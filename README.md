@@ -1,5 +1,7 @@
 # IQC Dashboard
 
+[![CI](https://github.com/Autonomous-Scientific-Agents/IQC_Dashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/Autonomous-Scientific-Agents/IQC_Dashboard/actions/workflows/ci.yml)
+
 A high-performance, open-source computational chemistry dashboard built with **Streamlit**. The IQC Dashboard provides fast, interactive visualization and analysis of large datasets produced by [**IQC (Interactive Quantum Chemistry)**](https://github.com/Autonomous-Scientific-Agents/IQC). It includes 3D molecular viewers, rich analytics, and efficient querying of large Parquet datasets using DuckDB.
 
 ---
@@ -258,8 +260,24 @@ uv pip install -e ".[dev]"
 
 ### Running tests
 
+Run all tests:
 ```bash
 pytest
+```
+
+Run tests with coverage:
+```bash
+pytest --cov=iqc_dashboard --cov-report=html
+```
+
+Run specific test file:
+```bash
+pytest tests/test_data_manager.py
+```
+
+Run tests in verbose mode:
+```bash
+pytest -v
 ```
 
 ### Code formatting
@@ -279,9 +297,19 @@ iqc_dashboard/
 │   ├── __init__.py
 │   ├── app.py          # Main Streamlit application
 │   └── cli.py          # Command-line interface
+├── tests/               # Unit tests
+│   ├── __init__.py
+│   ├── conftest.py     # Pytest fixtures
+│   ├── test_data_manager.py
+│   ├── test_render_molecule.py
+│   └── test_cli.py
+├── .github/
+│   └── workflows/
+│       └── ci.yml      # GitHub Actions CI workflow
 ├── .streamlit/
 │   └── config.toml     # Streamlit configuration
 ├── pyproject.toml      # Package configuration (PEP 621)
+├── pytest.ini         # Pytest configuration
 ├── requirements.txt    # Legacy requirements (for compatibility)
 └── README.md          # This file
 ```
