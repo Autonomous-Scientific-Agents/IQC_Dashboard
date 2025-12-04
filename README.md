@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/Autonomous-Scientific-Agents/IQC_Dashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/Autonomous-Scientific-Agents/IQC_Dashboard/actions/workflows/ci.yml)
 
+**🌐 Live Dashboard:** [https://iqc-dashboard.streamlit.app/](https://iqc-dashboard.streamlit.app/)
+
 A high-performance, open-source computational chemistry dashboard built with **Streamlit**. The IQC Dashboard provides fast, interactive visualization and analysis of large datasets produced by [**IQC (Interactive Quantum Chemistry)**](https://github.com/Autonomous-Scientific-Agents/IQC). It includes 3D molecular viewers, rich analytics, and efficient querying of large Parquet datasets using DuckDB.
 
 ---
