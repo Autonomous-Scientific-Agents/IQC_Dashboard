@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iqc-dashboard"
+version = "0.1.0"
+description = "A high-performance Computational Chemistry Dashboard using Streamlit, DuckDB, and 3D molecular visualization"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Autonomous Scientific Agents", email = ""}
+]
+keywords = ["computational-chemistry", "streamlit", "dashboard", "visualization", "molecular-dynamics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+
+dependencies = [
+    "streamlit>=1.28.0",
+    "duckdb>=0.9.0",
+    "pandas>=2.0.0",
+    "pyarrow>=14.0.0",
+    "stmol>=0.0.8",
+    "py3Dmol>=2.0.0",
+    "ipywidgets==7.6.3",
+    "ipython-genutils>=0.2.0",
+    "plotly>=5.17.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+iqc-dashboard = "iqc_dashboard.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Autonomous-Scientific-Agents/IQC_Dashboard"
+Documentation = "https://github.com/Autonomous-Scientific-Agents/IQC_Dashboard#readme"
+Repository = "https://github.com/Autonomous-Scientific-Agents/IQC_Dashboard"
+Issues = "https://github.com/Autonomous-Scientific-Agents/IQC_Dashboard/issues"
+
+[tool.setuptools]
+packages = ["iqc_dashboard"]
+
+[tool.setuptools.package-data]
+iqc_dashboard = ["*.toml"]
+
+[tool.black]
+line-length = 100
+target-version = ['py39', 'py310', 'py311', 'py312']
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
