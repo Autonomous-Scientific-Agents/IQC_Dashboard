@@ -1,0 +1,692 @@
+"""
+Computational Chemistry Dashboard
+A high-performance Streamlit app for analyzing computational chemistry data from Parquet files.
+"""
+
+import streamlit as st
+import duckdb
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from pathlib import Path
+import tempfile
+from typing import Optional, Dict, List, Tuple
+import numpy as np
+
+# Import 3D visualization libraries - will be checked when needed
+STMOL_AVAILABLE = False
+PY3DMOL_AVAILABLE = False
+IMPORT_ERROR_MSG = ""
+
+try:
+    import stmol
+    STMOL_AVAILABLE = True
+except ImportError as e:
+    IMPORT_ERROR_MSG = str(e)
+    pass  # Will check when rendering molecules
+
+try:
+    import py3Dmol
+    PY3DMOL_AVAILABLE = True
+except ImportError as e:
+    if not IMPORT_ERROR_MSG:
+        IMPORT_ERROR_MSG = str(e)
+    pass  # Will check when rendering molecules
+
+
+# ============================================================================
+# DataManager Class - Efficient Parquet File Handling
+# ============================================================================
+
+class DataManager:
+    """Manages data ingestion and querying using DuckDB for efficient Parquet file access."""
+    
+    def __init__(self, temp_dir: str):
+        self.temp_dir = Path(temp_dir)
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.conn: Optional[duckdb.DuckDBPyConnection] = None
+        self.parquet_files: List[str] = []
+    
+    def save_uploaded_files(self, uploaded_files: List) -> List[str]:
+        """Save uploaded Parquet files to temporary directory and return paths."""
+        saved_paths = []
+        for uploaded_file in uploaded_files:
+            if uploaded_file is not None:
+                file_path = self.temp_dir / uploaded_file.name
+                with open(file_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                saved_paths.append(str(file_path))
+        self.parquet_files = saved_paths
+        return saved_paths
+    
+    @staticmethod
+    @st.cache_resource
+    def get_connection() -> duckdb.DuckDBPyConnection:
+        """Get or create DuckDB connection (cached)."""
+        return duckdb.connect()
+    
+    def get_summary_stats(self) -> pd.DataFrame:
+        """Get summary statistics without loading full dataset."""
+        if not self.parquet_files:
+            return pd.DataFrame()
+        
+        conn = DataManager.get_connection()
+        
+        # Build query to read from all Parquet files
+        parquet_paths = "', '".join(self.parquet_files)
+        query = f"""
+        SELECT 
+            COUNT(*) as total_rows,
+            COUNT(DISTINCT calculator) as unique_calculators,
+            COUNT(DISTINCT task) as unique_tasks,
+            COUNT(DISTINCT formula) as unique_formulas,
+            AVG(opt_energy_eV) as avg_opt_energy,
+            AVG(initial_energy_eV) as avg_initial_energy,
+            SUM(CASE WHEN opt_converged THEN 1 ELSE 0 END) as converged_count,
+            SUM(CASE WHEN NOT opt_converged THEN 1 ELSE 0 END) as not_converged_count
+        FROM read_parquet(['{parquet_paths}'])
+        """
+        
+        try:
+            result = conn.execute(query).df()
+            return result
+        except Exception as e:
+            st.error(f"Error querying data: {e}")
+            return pd.DataFrame()
+    
+    def get_filtered_data(
+        self, 
+        calculator: Optional[str] = None,
+        task: Optional[str] = None,
+        formula: Optional[str] = None,
+        opt_converged: Optional[bool] = None,
+        limit: Optional[int] = None
+    ) -> pd.DataFrame:
+        """Get filtered data with optional limit for performance."""
+        if not self.parquet_files:
+            return pd.DataFrame()
+        
+        conn = DataManager.get_connection()
+        
+        # Build WHERE clause with parameterized queries
+        conditions = []
+        params = []
+        
+        if calculator:
+            conditions.append("calculator = ?")
+            params.append(calculator)
+        if task:
+            conditions.append("task = ?")
+            params.append(task)
+        if formula:
+            conditions.append("formula = ?")
+            params.append(formula)
+        if opt_converged is not None:
+            conditions.append("opt_converged = ?")
+            params.append(opt_converged)
+        
+        where_clause = " AND ".join(conditions) if conditions else ""
+        limit_clause = f"LIMIT {limit}" if limit else ""
+        
+        parquet_paths = "', '".join(self.parquet_files)
+        query = f"""
+        SELECT *
+        FROM read_parquet(['{parquet_paths}'])
+        {f'WHERE {where_clause}' if where_clause else ''}
+        {limit_clause}
+        """
+        
+        try:
+            if params:
+                result = conn.execute(query, params).df()
+            else:
+                result = conn.execute(query).df()
+            return result
+        except Exception as e:
+            st.error(f"Error querying filtered data: {e}")
+            return pd.DataFrame()
+    
+    def get_unique_values(self, column: str) -> List[str]:
+        """Get unique values for a column (for filter dropdowns)."""
+        if not self.parquet_files:
+            return []
+        
+        conn = DataManager.get_connection()
+        parquet_paths = "', '".join(self.parquet_files)
+        
+        query = f"""
+        SELECT DISTINCT {column}
+        FROM read_parquet(['{parquet_paths}'])
+        WHERE {column} IS NOT NULL
+        ORDER BY {column}
+        """
+        
+        try:
+            result = conn.execute(query).df()
+            return result[column].tolist()
+        except Exception as e:
+            st.warning(f"Error getting unique values for {column}: {e}")
+            return []
+    
+    def get_molecule_by_name(self, unique_name: str) -> Optional[pd.Series]:
+        """Get a single molecule by unique_name."""
+        if not self.parquet_files:
+            return None
+        
+        conn = DataManager.get_connection()
+        parquet_paths = "', '".join(self.parquet_files)
+        
+        # Use parameterized query to prevent SQL injection
+        query = f"""
+        SELECT *
+        FROM read_parquet(['{parquet_paths}'])
+        WHERE unique_name = ?
+        LIMIT 1
+        """
+        
+        try:
+            result = conn.execute(query, [unique_name]).df()
+            if not result.empty:
+                return result.iloc[0]
+            return None
+        except Exception as e:
+            st.error(f"Error fetching molecule: {e}")
+            return None
+    
+    def get_molecule_by_index(self, index: int) -> Optional[pd.Series]:
+        """Get a single molecule by row index."""
+        if not self.parquet_files:
+            return None
+        
+        conn = DataManager.get_connection()
+        parquet_paths = "', '".join(self.parquet_files)
+        
+        query = f"""
+        SELECT *
+        FROM read_parquet(['{parquet_paths}'])
+        LIMIT 1 OFFSET {index}
+        """
+        
+        try:
+            result = conn.execute(query).df()
+            if not result.empty:
+                return result.iloc[0]
+            return None
+        except Exception as e:
+            st.error(f"Error fetching molecule by index: {e}")
+            return None
+    
+    def get_all_molecule_names(self) -> List[str]:
+        """Get all unique molecule names for the selector."""
+        if not self.parquet_files:
+            return []
+        
+        conn = DataManager.get_connection()
+        parquet_paths = "', '".join(self.parquet_files)
+        
+        query = f"""
+        SELECT DISTINCT unique_name
+        FROM read_parquet(['{parquet_paths}'])
+        WHERE unique_name IS NOT NULL
+        ORDER BY unique_name
+        """
+        
+        try:
+            result = conn.execute(query).df()
+            return result['unique_name'].tolist()
+        except Exception as e:
+            st.warning(f"Error getting molecule names: {e}")
+            return []
+
+
+# ============================================================================
+# 3D Visualization Helper Functions
+# ============================================================================
+
+def render_molecule(xyz_string: str, style: str = 'stick', label: str = "") -> None:
+    """
+    Render a molecule in 3D using stmol.
+    
+    Args:
+        xyz_string: XYZ format string of the molecule
+        style: Visualization style ('stick', 'sphere', 'cartoon', etc.)
+        label: Optional label to display
+    """
+    # Check if required libraries are available
+    if not STMOL_AVAILABLE:
+        st.error("stmol is not installed or cannot be imported.")
+        st.error(f"Error details: {IMPORT_ERROR_MSG}")
+        st.error("**Solution:** Install missing dependencies:")
+        st.code("pip install ipython-genutils ipywidgets stmol", language="bash")
+        return
+    
+    if not PY3DMOL_AVAILABLE:
+        st.error("py3Dmol is not installed or cannot be imported.")
+        st.error(f"Error details: {IMPORT_ERROR_MSG}")
+        st.error("**Solution:** Install missing dependencies:")
+        st.code("pip install py3Dmol", language="bash")
+        return
+    
+    if not xyz_string or pd.isna(xyz_string):
+        st.warning(f"No XYZ data available for {label}")
+        return
+    
+    try:
+        # Import here to ensure they're available
+        import stmol
+        import py3Dmol
+        
+        # Create py3Dmol viewer
+        view = py3Dmol.view(width=400, height=400)
+        view.addModel(xyz_string, 'xyz')
+        
+        # Set visualization style
+        if style == 'stick':
+            view.setStyle({'stick': {}})
+        elif style == 'sphere':
+            view.setStyle({'sphere': {'radius': 0.5}})
+        elif style == 'cartoon':
+            view.setStyle({'cartoon': {}})
+        else:
+            view.setStyle({'stick': {}, 'sphere': {'radius': 0.3}})
+        
+        view.zoomTo()
+        view.render()
+        
+        # Display using stmol
+        stmol.showmol(view, height=400, width=400)
+        
+    except ImportError as e:
+        st.error(f"Import error when rendering molecule: {e}")
+        st.error("Please ensure both stmol and py3Dmol are installed in your environment.")
+    except Exception as e:
+        st.error(f"Error rendering molecule {label}: {e}")
+
+
+# ============================================================================
+# Main Streamlit App
+# ============================================================================
+
+def main():
+    st.set_page_config(
+        page_title="Computational Chemistry Dashboard",
+        page_icon="⚛️",
+        layout="wide"
+    )
+    
+    st.title("⚛️ Computational Chemistry Dashboard")
+    
+    # Diagnostic information (can be hidden with expander)
+    with st.expander("🔧 Diagnostic Information", expanded=False):
+        import sys
+        st.code(f"Python executable: {sys.executable}")
+        st.code(f"Python version: {sys.version}")
+        st.code(f"Python path: {sys.path[:3]}...")  # Show first 3 entries
+        
+        # Check imports
+        st.write("**Library Import Status:**")
+        st.write(f"- stmol: {'✅ Available' if STMOL_AVAILABLE else '❌ Not available'}")
+        st.write(f"- py3Dmol: {'✅ Available' if PY3DMOL_AVAILABLE else '❌ Not available'}")
+        
+        if not STMOL_AVAILABLE or not PY3DMOL_AVAILABLE:
+            st.error(f"**Import Error:** {IMPORT_ERROR_MSG}")
+            st.warning("""
+            **Troubleshooting:**
+            1. Install missing dependencies: `pip install ipython-genutils ipywidgets stmol py3Dmol`
+            2. If using conda: `conda activate iqc-env && pip install ipython-genutils ipywidgets stmol py3Dmol`
+            3. The error 'No module named ipython_genutils' means you need: `pip install ipython-genutils`
+            4. Run Streamlit with the correct Python: `/Users/keceli/miniconda3/envs/iqc-env/bin/python -m streamlit run app.py`
+            """)
+    
+    st.markdown("---")
+    
+    # Initialize session state
+    if 'data_manager' not in st.session_state:
+        temp_dir = tempfile.mkdtemp()
+        st.session_state.data_manager = DataManager(temp_dir)
+        st.session_state.data_loaded = False
+    
+    data_manager = st.session_state.data_manager
+    
+    # ========================================================================
+    # Sidebar
+    # ========================================================================
+    with st.sidebar:
+        st.header("📁 Data Management")
+        
+        # File Uploader
+        uploaded_files = st.file_uploader(
+            "Upload Parquet Files",
+            type=['parquet'],
+            accept_multiple_files=True,
+            help="Upload one or more Parquet files containing computational chemistry data"
+        )
+        
+        if uploaded_files:
+            with st.spinner("Processing uploaded files..."):
+                saved_paths = data_manager.save_uploaded_files(uploaded_files)
+                st.success(f"Loaded {len(saved_paths)} file(s)")
+                st.session_state.data_loaded = True
+        
+        st.markdown("---")
+        
+        # Global Filters
+        if st.session_state.data_loaded:
+            st.header("🔍 Filters")
+            
+            # Get unique values for filters
+            calculators = data_manager.get_unique_values('calculator')
+            tasks = data_manager.get_unique_values('task')
+            formulas = data_manager.get_unique_values('formula')
+            
+            selected_calculator = st.selectbox(
+                "Calculator",
+                options=[None] + calculators,
+                format_func=lambda x: "All" if x is None else x
+            )
+            
+            selected_task = st.selectbox(
+                "Task",
+                options=[None] + tasks,
+                format_func=lambda x: "All" if x is None else x
+            )
+            
+            selected_formula = st.selectbox(
+                "Formula",
+                options=[None] + formulas,
+                format_func=lambda x: "All" if x is None else x
+            )
+            
+            selected_converged = st.selectbox(
+                "Optimization Converged",
+                options=[None, True, False],
+                format_func=lambda x: "All" if x is None else ("Yes" if x else "No")
+            )
+            
+            st.markdown("---")
+            
+            # Molecule Selector
+            st.header("🔬 Molecule Selector")
+            
+            molecule_names = data_manager.get_all_molecule_names()
+            
+            if molecule_names:
+                selected_molecule = st.selectbox(
+                    "Select Molecule",
+                    options=molecule_names,
+                    help="Choose a molecule to inspect in detail"
+                )
+            else:
+                selected_molecule = None
+                st.info("No molecules available. Please upload data files.")
+        else:
+            selected_calculator = None
+            selected_task = None
+            selected_formula = None
+            selected_converged = None
+            selected_molecule = None
+    
+    # ========================================================================
+    # Main Content Area
+    # ========================================================================
+    
+    if not st.session_state.data_loaded:
+        st.info("👈 Please upload Parquet files using the sidebar to begin.")
+        st.markdown("""
+        ### Expected Data Schema
+        The app expects Parquet files with columns including:
+        - `unique_name`: Unique identifier for each molecule
+        - `initial_xyz`: Initial structure in XYZ format
+        - `opt_xyz`: Optimized structure in XYZ format
+        - `opt_energy_eV`: Optimized energy in eV
+        - `initial_energy_eV`: Initial energy in eV
+        - `formula`: Chemical formula
+        - `opt_converged`: Boolean indicating convergence
+        - And many more...
+        """)
+        return
+    
+    # Create tabs
+    tab1, tab2 = st.tabs(["🔬 Single Molecule Inspector", "📊 Dataset Analytics"])
+    
+    # ========================================================================
+    # Tab 1: Single Molecule Inspector
+    # ========================================================================
+    with tab1:
+        if selected_molecule:
+            molecule_data = data_manager.get_molecule_by_name(selected_molecule)
+            
+            if molecule_data is not None:
+                # Header with key information
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Formula", molecule_data.get('formula', 'N/A'))
+                with col2:
+                    energy = molecule_data.get('opt_energy_eV', None)
+                    if energy is not None:
+                        st.metric("Optimized Energy", f"{energy:.4f} eV")
+                    else:
+                        st.metric("Optimized Energy", "N/A")
+                with col3:
+                    initial_energy = molecule_data.get('initial_energy_eV', None)
+                    if initial_energy is not None:
+                        st.metric("Initial Energy", f"{initial_energy:.4f} eV")
+                    else:
+                        st.metric("Initial Energy", "N/A")
+                with col4:
+                    converged = molecule_data.get('opt_converged', None)
+                    status = "✅ Converged" if converged else "❌ Not Converged"
+                    st.metric("Status", status)
+                
+                st.markdown("---")
+                
+                # 3D Visualization
+                st.subheader("3D Molecular Structures")
+                
+                col_left, col_right = st.columns(2)
+                
+                with col_left:
+                    st.markdown("### Initial Structure")
+                    initial_xyz = molecule_data.get('initial_xyz', None)
+                    render_molecule(initial_xyz, style='stick', label="Initial")
+                
+                with col_right:
+                    st.markdown("### Optimized Structure")
+                    opt_xyz = molecule_data.get('opt_xyz', None)
+                    render_molecule(opt_xyz, style='stick', label="Optimized")
+                
+                st.markdown("---")
+                
+                # Metadata Table
+                st.subheader("Metadata")
+                
+                # Select relevant scalar columns to display
+                metadata_cols = [
+                    'unique_name', 'formula', 'number_of_atoms', 'number_of_electrons',
+                    'spin', 'calculator', 'task', 'model', 'opt_steps', 'opt_time',
+                    'vib_time', 'thermo_time', 'G_eV', 'H_eV', 'S_eV/K', 'E_ZPE_eV',
+                    'number_of_imaginary', 'smiles_changed', 'opt_converged',
+                    'initial_symmetry', 'opt_sym', 'initial_sym_number', 'opt_sym_number'
+                ]
+                
+                metadata_dict = {}
+                for col in metadata_cols:
+                    if col in molecule_data.index:
+                        value = molecule_data[col]
+                        if pd.notna(value):
+                            # Convert to string to avoid Arrow serialization issues with mixed types
+                            if isinstance(value, (list, np.ndarray)):
+                                metadata_dict[col] = str(value)
+                            else:
+                                metadata_dict[col] = str(value)
+                
+                if metadata_dict:
+                    metadata_df = pd.DataFrame([metadata_dict]).T
+                    metadata_df.columns = ['Value']
+                    st.dataframe(metadata_df, width='stretch')
+            else:
+                st.warning(f"Molecule '{selected_molecule}' not found in dataset.")
+        else:
+            st.info("Please select a molecule from the sidebar to view its details.")
+    
+    # ========================================================================
+    # Tab 2: Dataset Analytics
+    # ========================================================================
+    with tab2:
+        st.subheader("Dataset Statistics")
+        
+        # Get summary stats
+        summary = data_manager.get_summary_stats()
+        
+        if not summary.empty:
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Rows", int(summary['total_rows'].iloc[0]))
+            with col2:
+                st.metric("Unique Formulas", int(summary['unique_formulas'].iloc[0]))
+            with col3:
+                st.metric("Converged", int(summary['converged_count'].iloc[0]))
+            with col4:
+                st.metric("Not Converged", int(summary['not_converged_count'].iloc[0]))
+        
+        st.markdown("---")
+        
+        # Get filtered data for plotting (limit to reasonable size for performance)
+        with st.spinner("Loading data for visualization..."):
+            df = data_manager.get_filtered_data(
+                calculator=selected_calculator,
+                task=selected_task,
+                formula=selected_formula,
+                opt_converged=selected_converged,
+                limit=10000  # Limit for performance
+            )
+        
+        if df.empty:
+            st.warning("No data available with the current filters.")
+            return
+        
+        # Plot 1: Energy Comparison Scatter Plot
+        st.subheader("Energy Comparison: Initial vs Optimized")
+        if 'initial_energy_eV' in df.columns and 'opt_energy_eV' in df.columns:
+            fig_scatter = px.scatter(
+                df,
+                x='initial_energy_eV',
+                y='opt_energy_eV',
+                color='opt_converged',
+                hover_data=['formula', 'unique_name'],
+                labels={
+                    'initial_energy_eV': 'Initial Energy (eV)',
+                    'opt_energy_eV': 'Optimized Energy (eV)',
+                    'opt_converged': 'Converged'
+                },
+                title="Initial vs Optimized Energy"
+            )
+            # Add diagonal line
+            min_energy = min(df['initial_energy_eV'].min(), df['opt_energy_eV'].min())
+            max_energy = max(df['initial_energy_eV'].max(), df['opt_energy_eV'].max())
+            fig_scatter.add_trace(
+                go.Scatter(
+                    x=[min_energy, max_energy],
+                    y=[min_energy, max_energy],
+                    mode='lines',
+                    line=dict(dash='dash', color='gray'),
+                    name='y=x'
+                )
+            )
+            st.plotly_chart(fig_scatter, config={"displayModeBar": True}, use_container_width=True)
+        else:
+            st.warning("Energy columns not available in dataset.")
+        
+        # Plot 2: Optimization Time Histogram
+        st.subheader("Optimization Time Distribution")
+        if 'opt_time' in df.columns:
+            fig_hist = px.histogram(
+                df,
+                x='opt_time',
+                nbins=50,
+                labels={'opt_time': 'Optimization Time (seconds)', 'count': 'Frequency'},
+                title="Distribution of Optimization Times"
+            )
+            st.plotly_chart(fig_hist, config={"displayModeBar": True}, use_container_width=True)
+        else:
+            st.warning("Optimization time data not available.")
+        
+        # Plot 3: Number of Atoms Distribution
+        st.subheader("Number of Atoms Distribution")
+        if 'number_of_atoms' in df.columns:
+            fig_atoms = px.histogram(
+                df,
+                x='number_of_atoms',
+                nbins=30,
+                labels={'number_of_atoms': 'Number of Atoms', 'count': 'Frequency'},
+                title="Distribution of Number of Atoms"
+            )
+            st.plotly_chart(fig_atoms, config={"displayModeBar": True}, use_container_width=True)
+        else:
+            st.warning("Number of atoms data not available.")
+        
+        # Plot 4: Convergence Pie Chart
+        st.subheader("Optimization Convergence Status")
+        if 'opt_converged' in df.columns:
+            convergence_counts = df['opt_converged'].value_counts()
+            fig_pie = px.pie(
+                values=convergence_counts.values,
+                names=['Converged' if x else 'Not Converged' for x in convergence_counts.index],
+                title="Convergence Status Distribution"
+            )
+            st.plotly_chart(fig_pie, config={"displayModeBar": True}, use_container_width=True)
+        else:
+            st.warning("Convergence data not available.")
+        
+        # Plot 5: Vibrational Frequencies (if available)
+        st.subheader("Vibrational Frequencies Analysis")
+        if 'vibrational_frequencies_cm^-1' in df.columns:
+            # Get a sample molecule for frequency analysis
+            sample_molecule = st.selectbox(
+                "Select molecule for frequency spectrum",
+                options=df['unique_name'].tolist() if 'unique_name' in df.columns else [],
+                key="freq_selector"
+            )
+            
+            if sample_molecule:
+                mol_data = df[df['unique_name'] == sample_molecule].iloc[0]
+                frequencies = mol_data.get('vibrational_frequencies_cm^-1', None)
+                
+                # Check if frequencies exists and is a list or array
+                if frequencies is not None:
+                    if isinstance(frequencies, (list, np.ndarray)):
+                        freq_array = np.array(frequencies)
+                    elif hasattr(frequencies, '__iter__') and not isinstance(frequencies, str):
+                        freq_array = np.array(list(frequencies))
+                    else:
+                        freq_array = None
+                else:
+                    freq_array = None
+                
+                if freq_array is not None and len(freq_array) > 0:
+                    fig_vib = go.Figure()
+                    fig_vib.add_trace(go.Scatter(
+                        x=freq_array,
+                        y=[1] * len(freq_array),
+                        mode='markers',
+                        marker=dict(size=10, color='red'),
+                        name='Frequencies'
+                    ))
+                    fig_vib.update_layout(
+                        title=f"Vibrational Frequencies for {sample_molecule}",
+                        xaxis_title="Frequency (cm⁻¹)",
+                        yaxis_title="",
+                        height=400
+                    )
+                    st.plotly_chart(fig_vib, config={"displayModeBar": True}, use_container_width=True)
+                else:
+                    st.info("No vibrational frequency data available for selected molecule.")
+            else:
+                st.info("Please select a molecule to view its vibrational frequencies.")
+        else:
+            st.info("Vibrational frequency data not available in dataset.")
+
+
+if __name__ == "__main__":
+    main()
+
