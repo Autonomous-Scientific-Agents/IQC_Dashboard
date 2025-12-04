@@ -490,7 +490,7 @@ def main():
             "Upload Parquet Files",
             type=["parquet"],
             accept_multiple_files=True,
-            help="Upload one or more Parquet files containing computational chemistry data",
+            help="Upload IQC data in Parquet format",
         )
 
         if uploaded_files:
@@ -520,7 +520,7 @@ def main():
                 st.session_state.filter_text = ""
 
             # Reset filters button
-            if st.button("🔄 Reset All Filters", use_container_width=True):
+            if st.button("🔄 Reset All Filters", width="stretch"):
                 st.session_state.filter_calculator = None
                 st.session_state.filter_task = None
                 st.session_state.filter_formula = None
@@ -916,7 +916,7 @@ def main():
                     name="y=x",
                 )
             )
-            st.plotly_chart(fig_scatter, config={"displayModeBar": True}, use_container_width=True)
+            st.plotly_chart(fig_scatter, config={"displayModeBar": True}, width="stretch")
         else:
             st.warning("Energy columns not available in dataset.")
 
@@ -930,7 +930,7 @@ def main():
                 labels={"opt_time": "Optimization Time (seconds)", "count": "Frequency"},
                 title="Distribution of Optimization Times",
             )
-            st.plotly_chart(fig_hist, config={"displayModeBar": True}, use_container_width=True)
+            st.plotly_chart(fig_hist, config={"displayModeBar": True}, width="stretch")
         else:
             st.warning("Optimization time data not available.")
 
@@ -944,7 +944,7 @@ def main():
                 labels={"number_of_atoms": "Number of Atoms", "count": "Frequency"},
                 title="Distribution of Number of Atoms",
             )
-            st.plotly_chart(fig_atoms, config={"displayModeBar": True}, use_container_width=True)
+            st.plotly_chart(fig_atoms, config={"displayModeBar": True}, width="stretch")
         else:
             st.warning("Number of atoms data not available.")
 
@@ -957,7 +957,7 @@ def main():
                 names=["Converged" if x else "Not Converged" for x in convergence_counts.index],
                 title="Convergence Status Distribution",
             )
-            st.plotly_chart(fig_pie, config={"displayModeBar": True}, use_container_width=True)
+            st.plotly_chart(fig_pie, config={"displayModeBar": True}, width="stretch")
         else:
             st.warning("Convergence data not available.")
 
@@ -1004,7 +1004,7 @@ def main():
                         height=400,
                     )
                     st.plotly_chart(
-                        fig_vib, config={"displayModeBar": True}, use_container_width=True
+                        fig_vib, config={"displayModeBar": True}, width="stretch"
                     )
                 else:
                     st.info("No vibrational frequency data available for selected molecule.")
