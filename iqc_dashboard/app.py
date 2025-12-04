@@ -1003,9 +1003,7 @@ def main():
                         yaxis_title="",
                         height=400,
                     )
-                    st.plotly_chart(
-                        fig_vib, config={"displayModeBar": True}, width="stretch"
-                    )
+                    st.plotly_chart(fig_vib, config={"displayModeBar": True}, width="stretch")
                 else:
                     st.info("No vibrational frequency data available for selected molecule.")
             else:
