@@ -826,7 +826,7 @@ def main():
     with tab2:
         # Get filtered data first (no limit - load all matching rows)
         with st.spinner("Loading filtered data..."):
-            df = data_manager.get_filtered_data(
+            df_full = data_manager.get_filtered_data(
                 calculator=st.session_state.get("filter_calculator", None),
                 task=st.session_state.get("filter_task", None),
                 formula=st.session_state.get("filter_formula", None),
@@ -839,6 +839,30 @@ def main():
                 ),
                 limit=None,  # No limit - load all matching rows
             )
+
+        # Dataset size selector slider
+        if not df_full.empty:
+            total_rows = len(df_full)
+            initial_rows = min(1000, total_rows)  # Initial value: 1000 or total if less
+
+            selected_rows = st.slider(
+                "Select number of rows for analysis",
+                min_value=1,
+                max_value=total_rows,
+                value=initial_rows,
+                step=100,
+                help=f"Total filtered rows: {total_rows}. Select how many rows to use for analytics and plotting.",
+            )
+
+            # Limit dataframe to selected number of rows
+            df = df_full.head(selected_rows)
+
+            if selected_rows < total_rows:
+                st.info(
+                    f"📊 Showing {selected_rows:,} of {total_rows:,} filtered rows. Adjust the slider to see more or fewer rows."
+                )
+        else:
+            df = df_full
 
         # Display Dataset Schema (always show full schema, not filtered) - collapsed by default
         with st.expander("📋 Dataset Schema", expanded=False):
@@ -916,7 +940,7 @@ def main():
                     name="y=x",
                 )
             )
-            st.plotly_chart(fig_scatter, config={"displayModeBar": True}, width="stretch")
+            st.plotly_chart(fig_scatter, width="stretch")
         else:
             st.warning("Energy columns not available in dataset.")
 
@@ -930,7 +954,7 @@ def main():
                 labels={"opt_time": "Optimization Time (seconds)", "count": "Frequency"},
                 title="Distribution of Optimization Times",
             )
-            st.plotly_chart(fig_hist, config={"displayModeBar": True}, width="stretch")
+            st.plotly_chart(fig_hist, width="stretch")
         else:
             st.warning("Optimization time data not available.")
 
@@ -944,7 +968,7 @@ def main():
                 labels={"number_of_atoms": "Number of Atoms", "count": "Frequency"},
                 title="Distribution of Number of Atoms",
             )
-            st.plotly_chart(fig_atoms, config={"displayModeBar": True}, width="stretch")
+            st.plotly_chart(fig_atoms, width="stretch")
         else:
             st.warning("Number of atoms data not available.")
 
@@ -957,7 +981,7 @@ def main():
                 names=["Converged" if x else "Not Converged" for x in convergence_counts.index],
                 title="Convergence Status Distribution",
             )
-            st.plotly_chart(fig_pie, config={"displayModeBar": True}, width="stretch")
+            st.plotly_chart(fig_pie, width="stretch")
         else:
             st.warning("Convergence data not available.")
 
@@ -1003,7 +1027,7 @@ def main():
                         yaxis_title="",
                         height=400,
                     )
-                    st.plotly_chart(fig_vib, config={"displayModeBar": True}, width="stretch")
+                    st.plotly_chart(fig_vib, width="stretch")
                 else:
                     st.info("No vibrational frequency data available for selected molecule.")
             else:

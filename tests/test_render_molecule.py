@@ -43,20 +43,23 @@ class TestRenderMolecule:
                     render_molecule(xyz, label="Test")
                     mock_st.error.assert_called()
     
-    @patch('iqc_dashboard.app.stmol')
-    @patch('iqc_dashboard.app.py3Dmol')
-    def test_render_molecule_success(self, mock_py3dmol, mock_stmol):
+    def test_render_molecule_success(self):
         """Test successful molecule rendering."""
         # Mock the libraries
         with patch('iqc_dashboard.app.STMOL_AVAILABLE', True):
             with patch('iqc_dashboard.app.PY3DMOL_AVAILABLE', True):
                 with patch('iqc_dashboard.app.st') as mock_st:
-                    # Setup mocks
+                    # Setup mocks for imports inside the function
                     mock_view = MagicMock()
+                    mock_py3dmol = MagicMock()
                     mock_py3dmol.view.return_value = mock_view
+                    mock_stmol = MagicMock()
                     
-                    xyz = "3\nH2O\nH 0.0 0.0 0.0\nO 0.0 0.0 0.96\nH 0.87 0.0 0.39"
-                    render_molecule(xyz, style='stick', label="Test")
+                    # Patch sys.modules to intercept imports
+                    import sys
+                    with patch.dict(sys.modules, {'py3Dmol': mock_py3dmol, 'stmol': mock_stmol}):
+                        xyz = "3\nH2O\nH 0.0 0.0 0.0\nO 0.0 0.0 0.96\nH 0.87 0.0 0.39"
+                        render_molecule(xyz, style='stick', label="Test")
                     
                     # Verify py3Dmol was called
                     mock_py3dmol.view.assert_called_once_with(width=400, height=400)
@@ -66,29 +69,33 @@ class TestRenderMolecule:
                     mock_view.render.assert_called_once()
                     mock_stmol.showmol.assert_called_once()
     
-    @patch('iqc_dashboard.app.stmol')
-    @patch('iqc_dashboard.app.py3Dmol')
-    def test_render_molecule_different_styles(self, mock_py3dmol, mock_stmol):
+    def test_render_molecule_different_styles(self):
         """Test render_molecule with different styles."""
         with patch('iqc_dashboard.app.STMOL_AVAILABLE', True):
             with patch('iqc_dashboard.app.PY3DMOL_AVAILABLE', True):
                 with patch('iqc_dashboard.app.st'):
+                    # Setup mocks for imports inside the function
                     mock_view = MagicMock()
+                    mock_py3dmol = MagicMock()
                     mock_py3dmol.view.return_value = mock_view
+                    mock_stmol = MagicMock()
                     
-                    xyz = "3\nH2O\nH 0.0 0.0 0.0\nO 0.0 0.0 0.96\nH 0.87 0.0 0.39"
-                    
-                    # Test sphere style
-                    render_molecule(xyz, style='sphere')
-                    mock_view.setStyle.assert_called_with({'sphere': {'radius': 0.5}})
-                    
-                    # Test cartoon style
-                    mock_view.reset_mock()
-                    render_molecule(xyz, style='cartoon')
-                    mock_view.setStyle.assert_called_with({'cartoon': {}})
-                    
-                    # Test default style
-                    mock_view.reset_mock()
-                    render_molecule(xyz, style='unknown')
-                    mock_view.setStyle.assert_called_with({'stick': {}, 'sphere': {'radius': 0.3}})
+                    # Patch sys.modules to intercept imports
+                    import sys
+                    with patch.dict(sys.modules, {'py3Dmol': mock_py3dmol, 'stmol': mock_stmol}):
+                        xyz = "3\nH2O\nH 0.0 0.0 0.0\nO 0.0 0.0 0.96\nH 0.87 0.0 0.39"
+                        
+                        # Test sphere style
+                        render_molecule(xyz, style='sphere')
+                        mock_view.setStyle.assert_called_with({'sphere': {'radius': 0.5}})
+                        
+                        # Test cartoon style
+                        mock_view.reset_mock()
+                        render_molecule(xyz, style='cartoon')
+                        mock_view.setStyle.assert_called_with({'cartoon': {}})
+                        
+                        # Test default style
+                        mock_view.reset_mock()
+                        render_molecule(xyz, style='unknown')
+                        mock_view.setStyle.assert_called_with({'stick': {}, 'sphere': {'radius': 0.3}})
 

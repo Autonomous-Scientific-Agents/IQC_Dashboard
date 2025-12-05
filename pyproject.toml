@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
-    {name = "Autonomous Scientific Agents", email = ""}
+    {name = "Autonomous Scientific Agents"}
 ]
 keywords = ["computational-chemistry", "streamlit", "dashboard", "visualization", "molecular-dynamics"]
 classifiers = [

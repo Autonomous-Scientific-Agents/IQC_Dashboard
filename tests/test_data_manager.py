@@ -81,15 +81,30 @@ class TestDataManager:
         dm = DataManager(temp_dir)
         dm.parquet_files = [sample_parquet_file]
         
-        # Mock streamlit
+        # Setup mock connection
+        mock_conn = Mock()
+        mock_execute = Mock()
+        mock_conn.execute.return_value = mock_execute
+        
+        # Return actual DataFrame with summary stats
+        summary_df = pd.DataFrame({
+            'total_rows': [3],
+            'unique_formulas': [3],
+            'converged_count': [2],
+            'not_converged_count': [1]
+        })
+        mock_execute.df.return_value = summary_df
+        
+        # Mock streamlit and patch get_connection
         with patch('iqc_dashboard.app.st') as mock_st:
             mock_st.cache_resource = lambda x: x
-            result = dm.get_summary_stats()
-            
-            assert isinstance(result, pd.DataFrame)
-            assert not result.empty
-            assert 'total_rows' in result.columns
-            assert result['total_rows'].iloc[0] == 3
+            with patch.object(DataManager, 'get_connection', return_value=mock_conn):
+                result = dm.get_summary_stats()
+                
+                assert isinstance(result, pd.DataFrame)
+                assert not result.empty
+                assert 'total_rows' in result.columns
+                assert result['total_rows'].iloc[0] == 3
     
     def test_get_filtered_data_empty(self, temp_dir):
         """Test get_filtered_data with no files."""
@@ -103,30 +118,57 @@ class TestDataManager:
         dm = DataManager(temp_dir)
         dm.parquet_files = [sample_parquet_file]
         
-        # Mock streamlit
+        # Setup mock connection
+        mock_conn = Mock()
+        mock_execute = Mock()
+        mock_conn.execute.return_value = mock_execute
+        
+        # Return filtered DataFrame
+        filtered_df = pd.DataFrame({
+            'unique_name': ['mol_001', 'mol_002'],
+            'formula': ['H2O', 'CO2'],
+            'calculator': ['dft', 'dft'],
+            'opt_converged': [True, True]
+        })
+        mock_execute.df.return_value = filtered_df
+        
+        # Mock streamlit and patch get_connection
         with patch('iqc_dashboard.app.st') as mock_st:
             mock_st.cache_resource = lambda x: x
-            result = dm.get_filtered_data(calculator='dft', opt_converged=True)
-            
-            assert isinstance(result, pd.DataFrame)
-            # Should filter to converged molecules
-            if not result.empty:
-                assert all(result['opt_converged'] == True)
+            with patch.object(DataManager, 'get_connection', return_value=mock_conn):
+                result = dm.get_filtered_data(calculator='dft', opt_converged=True)
+                
+                assert isinstance(result, pd.DataFrame)
+                # Should filter to converged molecules
+                if not result.empty:
+                    assert all(result['opt_converged'] == True)
     
     def test_get_unique_values(self, temp_dir, sample_parquet_file):
         """Test get_unique_values."""
         dm = DataManager(temp_dir)
         dm.parquet_files = [sample_parquet_file]
         
-        # Mock streamlit
+        # Setup mock connection
+        mock_conn = Mock()
+        mock_execute = Mock()
+        mock_conn.execute.return_value = mock_execute
+        
+        # Return DataFrame with unique values
+        values_df = pd.DataFrame({
+            'formula': ['H2O', 'CO2', 'NH3']
+        })
+        mock_execute.df.return_value = values_df
+        
+        # Mock streamlit and patch get_connection
         with patch('iqc_dashboard.app.st') as mock_st:
             mock_st.cache_resource = lambda x: x
-            values = dm.get_unique_values('formula')
-            
-            assert isinstance(values, list)
-            assert 'H2O' in values
-            assert 'CO2' in values
-            assert 'NH3' in values
+            with patch.object(DataManager, 'get_connection', return_value=mock_conn):
+                values = dm.get_unique_values('formula')
+                
+                assert isinstance(values, list)
+                assert 'H2O' in values
+                assert 'CO2' in values
+                assert 'NH3' in values
     
     def test_get_unique_values_empty(self, temp_dir):
         """Test get_unique_values with no files."""
@@ -139,14 +181,28 @@ class TestDataManager:
         dm = DataManager(temp_dir)
         dm.parquet_files = [sample_parquet_file]
         
-        # Mock streamlit
+        # Setup mock connection
+        mock_conn = Mock()
+        mock_execute = Mock()
+        mock_conn.execute.return_value = mock_execute
+        
+        # Return DataFrame with molecule data
+        molecule_df = pd.DataFrame({
+            'unique_name': ['mol_001'],
+            'formula': ['H2O'],
+            'number_of_atoms': [3]
+        })
+        mock_execute.df.return_value = molecule_df
+        
+        # Mock streamlit and patch get_connection
         with patch('iqc_dashboard.app.st') as mock_st:
             mock_st.cache_resource = lambda x: x
-            molecule = dm.get_molecule_by_name('mol_001')
-            
-            assert molecule is not None
-            assert molecule['formula'] == 'H2O'
-            assert molecule['unique_name'] == 'mol_001'
+            with patch.object(DataManager, 'get_connection', return_value=mock_conn):
+                molecule = dm.get_molecule_by_name('mol_001')
+                
+                assert molecule is not None
+                assert molecule['formula'] == 'H2O'
+                assert molecule['unique_name'] == 'mol_001'
     
     def test_get_molecule_by_name_not_found(self, temp_dir, sample_parquet_file):
         """Test get_molecule_by_name with non-existent molecule."""
@@ -164,27 +220,53 @@ class TestDataManager:
         dm = DataManager(temp_dir)
         dm.parquet_files = [sample_parquet_file]
         
-        # Mock streamlit
+        # Setup mock connection
+        mock_conn = Mock()
+        mock_execute = Mock()
+        mock_conn.execute.return_value = mock_execute
+        
+        # Return DataFrame with molecule data
+        molecule_df = pd.DataFrame({
+            'unique_name': ['mol_001'],
+            'formula': ['H2O'],
+            'number_of_atoms': [3]
+        })
+        mock_execute.df.return_value = molecule_df
+        
+        # Mock streamlit and patch get_connection
         with patch('iqc_dashboard.app.st') as mock_st:
             mock_st.cache_resource = lambda x: x
-            molecule = dm.get_molecule_by_index(0)
-            
-            assert molecule is not None
-            assert molecule['unique_name'] == 'mol_001'
+            with patch.object(DataManager, 'get_connection', return_value=mock_conn):
+                molecule = dm.get_molecule_by_index(0)
+                
+                assert molecule is not None
+                assert molecule['unique_name'] == 'mol_001'
     
     def test_get_all_molecule_names(self, temp_dir, sample_parquet_file):
         """Test get_all_molecule_names."""
         dm = DataManager(temp_dir)
         dm.parquet_files = [sample_parquet_file]
         
-        # Mock streamlit
+        # Setup mock connection
+        mock_conn = Mock()
+        mock_execute = Mock()
+        mock_conn.execute.return_value = mock_execute
+        
+        # Return DataFrame with molecule names
+        names_df = pd.DataFrame({
+            'unique_name': ['mol_001', 'mol_002', 'mol_003']
+        })
+        mock_execute.df.return_value = names_df
+        
+        # Mock streamlit and patch get_connection
         with patch('iqc_dashboard.app.st') as mock_st:
             mock_st.cache_resource = lambda x: x
-            names = dm.get_all_molecule_names()
-            
-            assert isinstance(names, list)
-            assert len(names) == 3
-            assert 'mol_001' in names
-            assert 'mol_002' in names
-            assert 'mol_003' in names
+            with patch.object(DataManager, 'get_connection', return_value=mock_conn):
+                names = dm.get_all_molecule_names()
+                
+                assert isinstance(names, list)
+                assert len(names) == 3
+                assert 'mol_001' in names
+                assert 'mol_002' in names
+                assert 'mol_003' in names
 
