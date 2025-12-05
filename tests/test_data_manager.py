@@ -72,7 +72,8 @@ class TestDataManager:
     def test_get_summary_stats_empty(self, temp_dir):
         """Test get_summary_stats with no files."""
         dm = DataManager(temp_dir)
-        result = dm.get_summary_stats()
+        parquet_hash = dm._get_parquet_files_hash()
+        result = dm.get_summary_stats(parquet_hash)
         assert isinstance(result, pd.DataFrame)
         assert result.empty
     
@@ -99,7 +100,8 @@ class TestDataManager:
         with patch('iqc_dashboard.app.st') as mock_st:
             mock_st.cache_resource = lambda x: x
             with patch.object(DataManager, 'get_connection', return_value=mock_conn):
-                result = dm.get_summary_stats()
+                parquet_hash = dm._get_parquet_files_hash()
+                result = dm.get_summary_stats(parquet_hash)
                 
                 assert isinstance(result, pd.DataFrame)
                 assert not result.empty
@@ -163,7 +165,8 @@ class TestDataManager:
         with patch('iqc_dashboard.app.st') as mock_st:
             mock_st.cache_resource = lambda x: x
             with patch.object(DataManager, 'get_connection', return_value=mock_conn):
-                values = dm.get_unique_values('formula')
+                parquet_hash = dm._get_parquet_files_hash()
+                values = dm.get_unique_values('formula', parquet_hash)
                 
                 assert isinstance(values, list)
                 assert 'H2O' in values
@@ -173,7 +176,8 @@ class TestDataManager:
     def test_get_unique_values_empty(self, temp_dir):
         """Test get_unique_values with no files."""
         dm = DataManager(temp_dir)
-        values = dm.get_unique_values('formula')
+        parquet_hash = dm._get_parquet_files_hash()
+        values = dm.get_unique_values('formula', parquet_hash)
         assert values == []
     
     def test_get_molecule_by_name(self, temp_dir, sample_parquet_file):
@@ -262,7 +266,8 @@ class TestDataManager:
         with patch('iqc_dashboard.app.st') as mock_st:
             mock_st.cache_resource = lambda x: x
             with patch.object(DataManager, 'get_connection', return_value=mock_conn):
-                names = dm.get_all_molecule_names()
+                parquet_hash = dm._get_parquet_files_hash()
+                names = dm.get_all_molecule_names(parquet_hash)
                 
                 assert isinstance(names, list)
                 assert len(names) == 3

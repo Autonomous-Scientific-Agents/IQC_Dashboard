@@ -15,6 +15,7 @@ import numpy as np
 import re
 import difflib
 import html
+import hashlib
 
 # Import 3D visualization libraries - will be checked when needed
 STMOL_AVAILABLE = False
@@ -65,21 +66,34 @@ class DataManager:
         self.parquet_files = saved_paths
         return saved_paths
 
+    def _get_parquet_files_hash(self) -> str:
+        """Generate a hash of parquet files for caching purposes."""
+        if not self.parquet_files:
+            return ""
+        # Create a hash based on file paths and modification times
+        file_info = []
+        for file_path in sorted(self.parquet_files):
+            path = Path(file_path)
+            if path.exists():
+                file_info.append(f"{file_path}:{path.stat().st_mtime}")
+        return hashlib.md5("|".join(file_info).encode()).hexdigest()
+
     @staticmethod
     @st.cache_resource
     def get_connection() -> duckdb.DuckDBPyConnection:
         """Get or create DuckDB connection (cached)."""
         return duckdb.connect()
 
-    def get_summary_stats(self) -> pd.DataFrame:
-        """Get summary statistics without loading full dataset."""
-        if not self.parquet_files:
+    @st.cache_data(ttl=3600)  # Cache for 1 hour
+    def get_summary_stats(_self, parquet_files_hash: str) -> pd.DataFrame:
+        """Get summary statistics without loading full dataset. Cached based on parquet files."""
+        if not _self.parquet_files:
             return pd.DataFrame()
 
         conn = DataManager.get_connection()
 
         # Build query to read from all Parquet files
-        parquet_paths = "', '".join(self.parquet_files)
+        parquet_paths = "', '".join(_self.parquet_files)
         query = f"""
         SELECT 
             COUNT(*) as total_rows,
@@ -153,53 +167,141 @@ class DataManager:
             else:
                 result = conn.execute(query).df()
 
-            # Apply text filter using regex if provided
+            # Apply text filter using SQL if possible (more efficient than pandas)
             if text_filter and text_filter.strip():
                 try:
-                    pattern = re.compile(text_filter, re.IGNORECASE)
-                    mask = pd.Series([False] * len(result))
+                    # Escape special SQL characters
+                    text_filter_escaped = text_filter.replace("'", "''").replace("\\", "\\\\")
 
-                    # Check unique_name
-                    if "unique_name" in result.columns:
-                        mask |= (
-                            result["unique_name"]
-                            .astype(str)
-                            .str.contains(pattern, na=False, regex=True)
+                    # Check if it's a simple pattern (no regex special chars except *)
+                    is_simple_pattern = not any(
+                        char in text_filter
+                        for char in ["^", "$", "[", "]", "(", ")", "+", "?", "{", "}", "|", "."]
+                    )
+
+                    if is_simple_pattern:
+                        # Use ILIKE for simple case-insensitive pattern matching (faster)
+                        text_conditions = []
+                        text_conditions.append(
+                            f"COALESCE(CAST(unique_name AS VARCHAR), '') ILIKE '%{text_filter_escaped}%'"
+                        )
+                        text_conditions.append(
+                            f"COALESCE(CAST(initial_smiles AS VARCHAR), '') ILIKE '%{text_filter_escaped}%'"
+                        )
+                        text_conditions.append(
+                            f"COALESCE(CAST(opt_smiles AS VARCHAR), '') ILIKE '%{text_filter_escaped}%'"
+                        )
+                    else:
+                        # Use regexp_matches for complex regex patterns
+                        text_conditions = []
+                        text_conditions.append(
+                            f"regexp_matches(COALESCE(CAST(unique_name AS VARCHAR), ''), '{text_filter_escaped}', 'i')"
+                        )
+                        text_conditions.append(
+                            f"regexp_matches(COALESCE(CAST(initial_smiles AS VARCHAR), ''), '{text_filter_escaped}', 'i')"
+                        )
+                        text_conditions.append(
+                            f"regexp_matches(COALESCE(CAST(opt_smiles AS VARCHAR), ''), '{text_filter_escaped}', 'i')"
                         )
 
-                    # Check initial_smiles
-                    if "initial_smiles" in result.columns:
-                        mask |= (
-                            result["initial_smiles"]
-                            .astype(str)
-                            .str.contains(pattern, na=False, regex=True)
-                        )
+                    text_where = " OR ".join(text_conditions)
 
-                    # Check opt_smiles
-                    if "opt_smiles" in result.columns:
-                        mask |= (
-                            result["opt_smiles"]
-                            .astype(str)
-                            .str.contains(pattern, na=False, regex=True)
-                        )
+                    # Re-query with text filter in SQL (more efficient)
+                    query_with_text = f"""
+                    SELECT *
+                    FROM read_parquet(['{parquet_paths}'])
+                    {f'WHERE {where_clause}' if where_clause else ''}
+                    {f'AND ({text_where})' if where_clause else f'WHERE ({text_where})'}
+                    {limit_clause}
+                    """
 
-                    result = result[mask]
-                except re.error as e:
-                    st.warning(f"Invalid regex pattern: {e}")
-                    return pd.DataFrame()
+                    if params:
+                        result = conn.execute(query_with_text, params).df()
+                    else:
+                        result = conn.execute(query_with_text).df()
+                except Exception as e:
+                    # Fallback to pandas filtering if SQL regex fails
+                    try:
+                        pattern = re.compile(text_filter, re.IGNORECASE)
+                        mask = pd.Series([False] * len(result))
+
+                        # Check unique_name
+                        if "unique_name" in result.columns:
+                            mask |= (
+                                result["unique_name"]
+                                .astype(str)
+                                .str.contains(pattern, na=False, regex=True)
+                            )
+
+                        # Check initial_smiles
+                        if "initial_smiles" in result.columns:
+                            mask |= (
+                                result["initial_smiles"]
+                                .astype(str)
+                                .str.contains(pattern, na=False, regex=True)
+                            )
+
+                        # Check opt_smiles
+                        if "opt_smiles" in result.columns:
+                            mask |= (
+                                result["opt_smiles"]
+                                .astype(str)
+                                .str.contains(pattern, na=False, regex=True)
+                            )
+
+                        result = result[mask]
+                    except re.error as re_err:
+                        st.warning(f"Invalid regex pattern: {re_err}")
+                        return pd.DataFrame()
+
+            # Optimize memory usage by converting object columns to category where appropriate
+            if not result.empty:
+                for col in result.columns:
+                    if result[col].dtype == "object":
+                        try:
+                            # Skip columns that contain arrays, lists, or other complex types
+                            # Check if first non-null value is hashable (simple string/number)
+                            non_null_values = result[col].dropna()
+                            if non_null_values.empty:
+                                continue
+
+                            sample_value = non_null_values.iloc[0]
+                            # Skip if it's a list, array, or dict
+                            if isinstance(sample_value, (list, dict, np.ndarray)):
+                                continue
+                            # Try to hash it - if it fails, skip this column
+                            try:
+                                hash(sample_value)
+                            except (TypeError, ValueError):
+                                continue
+
+                            # Convert to category if unique values are less than 50% of total
+                            # Use try-except around nunique() in case it fails with arrays
+                            try:
+                                unique_count = result[col].nunique()
+                                unique_ratio = unique_count / len(result)
+                                if unique_ratio < 0.5 and unique_count > 0:
+                                    result[col] = result[col].astype("category")
+                            except (TypeError, ValueError):
+                                # Skip if nunique() fails (e.g., with unhashable types)
+                                continue
+                        except (ValueError, TypeError, AttributeError, IndexError):
+                            # Skip if conversion fails or column has issues
+                            pass
 
             return result
         except Exception as e:
             st.error(f"Error querying filtered data: {e}")
             return pd.DataFrame()
 
-    def get_unique_values(self, column: str) -> List[str]:
-        """Get unique values for a column (for filter dropdowns)."""
-        if not self.parquet_files:
+    @st.cache_data(ttl=3600)  # Cache for 1 hour
+    def get_unique_values(_self, column: str, parquet_files_hash: str) -> List[str]:
+        """Get unique values for a column (for filter dropdowns). Cached based on column and files."""
+        if not _self.parquet_files:
             return []
 
         conn = DataManager.get_connection()
-        parquet_paths = "', '".join(self.parquet_files)
+        parquet_paths = "', '".join(_self.parquet_files)
 
         query = f"""
         SELECT DISTINCT {column}
@@ -263,13 +365,14 @@ class DataManager:
             st.error(f"Error fetching molecule by index: {e}")
             return None
 
-    def get_all_molecule_names(self) -> List[str]:
-        """Get all unique molecule names for the selector."""
-        if not self.parquet_files:
+    @st.cache_data(ttl=3600)  # Cache for 1 hour
+    def get_all_molecule_names(_self, parquet_files_hash: str) -> List[str]:
+        """Get all unique molecule names for the selector. Cached based on parquet files."""
+        if not _self.parquet_files:
             return []
 
         conn = DataManager.get_connection()
-        parquet_paths = "', '".join(self.parquet_files)
+        parquet_paths = "', '".join(_self.parquet_files)
 
         query = f"""
         SELECT DISTINCT unique_name
@@ -285,13 +388,14 @@ class DataManager:
             st.warning(f"Error getting molecule names: {e}")
             return []
 
-    def get_schema(self) -> pd.DataFrame:
-        """Get column names and types from the Parquet files."""
-        if not self.parquet_files:
+    @st.cache_data(ttl=3600)  # Cache for 1 hour
+    def get_schema(_self, parquet_files_hash: str) -> pd.DataFrame:
+        """Get column names and types from the Parquet files. Cached based on parquet files."""
+        if not _self.parquet_files:
             return pd.DataFrame()
 
         conn = DataManager.get_connection()
-        parquet_paths = "', '".join(self.parquet_files)
+        parquet_paths = "', '".join(_self.parquet_files)
 
         # Use DESCRIBE to get column information
         query = f"""
@@ -506,10 +610,6 @@ def main():
             st.header("🔍 Filters")
 
             # Initialize filter state if not exists
-            if "filter_calculator" not in st.session_state:
-                st.session_state.filter_calculator = None
-            if "filter_task" not in st.session_state:
-                st.session_state.filter_task = None
             if "filter_formula" not in st.session_state:
                 st.session_state.filter_formula = None
             if "filter_converged" not in st.session_state:
@@ -521,8 +621,6 @@ def main():
 
             # Reset filters button
             if st.button("🔄 Reset All Filters", width="stretch"):
-                st.session_state.filter_calculator = None
-                st.session_state.filter_task = None
                 st.session_state.filter_formula = None
                 st.session_state.filter_converged = None
                 st.session_state.filter_smiles_changed = None
@@ -532,25 +630,8 @@ def main():
             st.markdown("---")
 
             # Get unique values for filters
-            calculators = data_manager.get_unique_values("calculator")
-            tasks = data_manager.get_unique_values("task")
-            formulas = data_manager.get_unique_values("formula")
-
-            selected_calculator = st.selectbox(
-                "Calculator",
-                options=[None] + calculators,
-                format_func=lambda x: "All" if x is None else x,
-                key="filter_calculator_select",
-            )
-            st.session_state.filter_calculator = selected_calculator
-
-            selected_task = st.selectbox(
-                "Task",
-                options=[None] + tasks,
-                format_func=lambda x: "All" if x is None else x,
-                key="filter_task_select",
-            )
-            st.session_state.filter_task = selected_task
+            parquet_hash = data_manager._get_parquet_files_hash()
+            formulas = data_manager.get_unique_values("formula", parquet_hash)
 
             selected_formula = st.selectbox(
                 "Formula",
@@ -592,8 +673,6 @@ def main():
 
             # Get filtered molecule names based on current filters
             filtered_df = data_manager.get_filtered_data(
-                calculator=st.session_state.get("filter_calculator", None),
-                task=st.session_state.get("filter_task", None),
                 formula=st.session_state.get("filter_formula", None),
                 opt_converged=st.session_state.get("filter_converged", None),
                 smiles_changed=st.session_state.get("filter_smiles_changed", None),
@@ -608,7 +687,8 @@ def main():
             if not filtered_df.empty and "unique_name" in filtered_df.columns:
                 molecule_names = sorted(filtered_df["unique_name"].unique().tolist())
             else:
-                molecule_names = sorted(data_manager.get_all_molecule_names())
+                parquet_hash = data_manager._get_parquet_files_hash()
+                molecule_names = sorted(data_manager.get_all_molecule_names(parquet_hash))
 
             if molecule_names:
                 selected_molecule = st.selectbox(
@@ -620,8 +700,6 @@ def main():
                 selected_molecule = None
                 st.info("No molecules available. Please upload data files or adjust filters.")
         else:
-            selected_calculator = None
-            selected_task = None
             selected_formula = None
             selected_converged = None
             selected_smiles_changed = None
@@ -827,8 +905,6 @@ def main():
         # Get filtered data first (no limit - load all matching rows)
         with st.spinner("Loading filtered data..."):
             df_full = data_manager.get_filtered_data(
-                calculator=st.session_state.get("filter_calculator", None),
-                task=st.session_state.get("filter_task", None),
                 formula=st.session_state.get("filter_formula", None),
                 opt_converged=st.session_state.get("filter_converged", None),
                 smiles_changed=st.session_state.get("filter_smiles_changed", None),
@@ -866,7 +942,8 @@ def main():
 
         # Display Dataset Schema (always show full schema, not filtered) - collapsed by default
         with st.expander("📋 Dataset Schema", expanded=False):
-            schema = data_manager.get_schema()
+            parquet_hash = data_manager._get_parquet_files_hash()
+            schema = data_manager.get_schema(parquet_hash)
             if not schema.empty:
                 # Rename columns for better display
                 if "column_name" in schema.columns and "column_type" in schema.columns:
