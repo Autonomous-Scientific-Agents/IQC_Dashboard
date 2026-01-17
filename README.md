@@ -62,9 +62,22 @@ Deep dive into one molecule at a time with:
 
 ### Installation
 
-#### Step 1: Set Up a Virtual Environment (Recommended)
+#### Step 1: Verify Python Version
 
-It's recommended to use a virtual environment to isolate dependencies. Choose one of the following methods:
+IQC Dashboard requires Python 3.9 or higher. Check your Python version:
+```bash
+python --version
+# or
+python3 --version
+```
+
+If you need to install or upgrade Python, visit [python.org](https://www.python.org/downloads/).
+
+#### Step 2: Set Up a Virtual Environment (Recommended)
+
+**⚠️ Important:** Always use a virtual environment to isolate dependencies and avoid conflicts with system packages.
+
+Choose one of the following methods:
 
 **Option A: Using `venv` (built into Python 3.9+)**
 ```bash
@@ -88,42 +101,83 @@ source iqc-dashboard-env/bin/activate  # On macOS/Linux
 iqc-dashboard-env\Scripts\activate  # On Windows
 ```
 
-#### Step 2: Install IQC Dashboard
+**Verify your virtual environment is activated:**
+- Your terminal prompt should show the environment name (e.g., `(iqc-dashboard-env)`)
+- Running `which python` (Linux/macOS) or `where python` (Windows) should point to the virtual environment's Python
 
-Once your virtual environment is activated, install the dashboard:
+#### Step 3: Ensure pip is Available and Up-to-Date
 
-**Using pip:**
+If your virtual environment doesn't have pip installed, bootstrap it:
 ```bash
-pip install iqc-dashboard
+python -m ensurepip --upgrade
 ```
 
-**Using uv (recommended for faster installation):**
+Then upgrade pip to the latest version:
 ```bash
-uv pip install iqc-dashboard
+python -m pip install --upgrade pip
 ```
 
-**From source:**
+**Note:** Using `python -m pip` instead of just `pip` ensures you're using the pip from your virtual environment.
+
+#### Step 4: Install IQC Dashboard
+
+**Option A: Install from PyPI (recommended for most users)**
+```bash
+python -m pip install iqc-dashboard
+```
+
+**Option B: Install from source (for development or latest features)**
 ```bash
 git clone https://github.com/Autonomous-Scientific-Agents/IQC_Dashboard.git
 cd IQC_Dashboard
-pip install -e .
-# or with uv:
+python -m pip install -e .
+```
+
+**Option C: Using `uv` (fastest installation)**
+```bash
+# From PyPI
+uv pip install iqc-dashboard
+
+# From source
+git clone https://github.com/Autonomous-Scientific-Agents/IQC_Dashboard.git
+cd IQC_Dashboard
 uv pip install -e .
 ```
 
-#### Step 3: Run the Dashboard
+**Troubleshooting installation issues:**
+- If you get permission errors, make sure your virtual environment is activated
+- If `pip` command is not found, use `python -m pip` instead
+- If editable install fails, ensure `setuptools` is installed: `python -m pip install setuptools wheel`
 
-After installation, simply run:
+#### Step 5: Verify Installation
+
+Verify the installation was successful:
 ```bash
-streamlit run streamlit_app.py
+iqc-dashboard --help
+# or
+python -m iqc_dashboard.cli --help
 ```
 
-Or if you installed the package, you can use:
+#### Step 6: Run the Dashboard
+
+After installation, you can run the dashboard in several ways:
+
+**Option 1: Using the command-line entry point (recommended)**
 ```bash
 iqc-dashboard
 ```
 
-**Note:** If you installed from source, make sure you're in the repository directory when running `streamlit run streamlit_app.py`, or use the `iqc-dashboard` command after installation.
+**Option 2: Using Streamlit directly**
+```bash
+streamlit run streamlit_app.py
+```
+
+**Option 3: Running from the package**
+```bash
+python -m streamlit run streamlit_app.py
+```
+
+**Note:** If you installed from source, you can run `streamlit run streamlit_app.py` from the repository directory, or use the `iqc-dashboard` command from anywhere after installation.
 
 ---
 
@@ -236,29 +290,46 @@ No environment variables are required for basic operation. If you need to config
 
 ### Setting up a development environment
 
+1. **Clone the repository:**
 ```bash
 git clone https://github.com/Autonomous-Scientific-Agents/IQC_Dashboard.git
 cd IQC_Dashboard
+```
 
-# Create and activate virtual environment (choose one method)
+2. **Create and activate a virtual environment:**
+
+**Using `venv`:**
+```bash
 python -m venv venv
 source venv/bin/activate  # On macOS/Linux
 # or
 venv\Scripts\activate  # On Windows
-
-# Install in development mode with dev dependencies
-pip install -e ".[dev]"
 ```
 
-Or with uv:
-
+**Using `uv`:**
 ```bash
-git clone https://github.com/Autonomous-Scientific-Agents/IQC_Dashboard.git
-cd IQC_Dashboard
 uv venv
 source .venv/bin/activate  # On macOS/Linux
+# or
+.venv\Scripts\activate  # On Windows
+```
+
+3. **Ensure pip is up-to-date:**
+```bash
+python -m pip install --upgrade pip
+```
+
+4. **Install in development mode with dev dependencies:**
+```bash
+python -m pip install -e ".[dev]"
+```
+
+**Or with uv:**
+```bash
 uv pip install -e ".[dev]"
 ```
+
+**Note:** The `[dev]` extra includes development tools like `pytest`, `black`, `ruff`, and `mypy`.
 
 ### Running tests
 
