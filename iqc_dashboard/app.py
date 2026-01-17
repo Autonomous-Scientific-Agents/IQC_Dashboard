@@ -10,7 +10,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
 import tempfile
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, List, Tuple
 import numpy as np
 import re
 import difflib
@@ -23,7 +23,7 @@ PY3DMOL_AVAILABLE = False
 IMPORT_ERROR_MSG = ""
 
 try:
-    import stmol
+    import stmol  # noqa: F401
 
     STMOL_AVAILABLE = True
 except ImportError as e:
@@ -31,7 +31,7 @@ except ImportError as e:
     pass  # Will check when rendering molecules
 
 try:
-    import py3Dmol
+    import py3Dmol  # noqa: F401
 
     PY3DMOL_AVAILABLE = True
 except ImportError as e:
@@ -219,7 +219,7 @@ class DataManager:
                         result = conn.execute(query_with_text, params).df()
                     else:
                         result = conn.execute(query_with_text).df()
-                except Exception as e:
+                except Exception:
                     # Fallback to pandas filtering if SQL regex fails
                     try:
                         pattern = re.compile(text_filter, re.IGNORECASE)
@@ -405,7 +405,7 @@ class DataManager:
         try:
             result = conn.execute(query).df()
             return result
-        except Exception as e:
+        except Exception:
             # Fallback: try to get schema from a sample query
             try:
                 sample_query = f"SELECT * FROM read_parquet(['{parquet_paths}']) LIMIT 1"

@@ -1,9 +1,8 @@
 """Tests for DataManager class."""
 
-import pytest
 import pandas as pd
 from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 import sys
 
 # Add parent directory to path to import the module
@@ -143,7 +142,7 @@ class TestDataManager:
                 assert isinstance(result, pd.DataFrame)
                 # Should filter to converged molecules
                 if not result.empty:
-                    assert all(result['opt_converged'] == True)
+                    assert all(result['opt_converged'])
     
     def test_get_unique_values(self, temp_dir, sample_parquet_file):
         """Test get_unique_values."""

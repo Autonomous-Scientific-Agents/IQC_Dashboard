@@ -1,14 +1,13 @@
 """Tests for render_molecule function."""
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import patch, MagicMock
 import sys
 from pathlib import Path
 
 # Add parent directory to path to import the module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from iqc_dashboard.app import render_molecule, STMOL_AVAILABLE, PY3DMOL_AVAILABLE
+from iqc_dashboard.app import render_molecule
 
 
 class TestRenderMolecule:
@@ -48,7 +47,7 @@ class TestRenderMolecule:
         # Mock the libraries
         with patch('iqc_dashboard.app.STMOL_AVAILABLE', True):
             with patch('iqc_dashboard.app.PY3DMOL_AVAILABLE', True):
-                with patch('iqc_dashboard.app.st') as mock_st:
+                with patch('iqc_dashboard.app.st'):
                     # Setup mocks for imports inside the function
                     mock_view = MagicMock()
                     mock_py3dmol = MagicMock()
