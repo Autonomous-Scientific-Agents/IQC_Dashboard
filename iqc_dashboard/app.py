@@ -610,6 +610,9 @@ def main(data_paths: Optional[List[str]] = None):
             st.session_state["cli_data_paths"] = list(data_paths)
             loaded_paths = data_manager.load_parquet_paths(data_paths)
             st.session_state.data_loaded = bool(loaded_paths)
+            st.session_state["cli_loaded_paths"] = loaded_paths
+        elif "cli_loaded_paths" not in st.session_state:
+            st.session_state["cli_loaded_paths"] = data_manager.parquet_files
 
     # ========================================================================
     # Sidebar
@@ -630,6 +633,15 @@ def main(data_paths: Optional[List[str]] = None):
                 saved_paths = data_manager.save_uploaded_files(uploaded_files)
                 st.success(f"Loaded {len(saved_paths)} file(s)")
                 st.session_state.data_loaded = True
+                st.session_state["cli_loaded_paths"] = []
+
+        if st.session_state.get("cli_loaded_paths"):
+            st.success(
+                f"Loaded {len(st.session_state['cli_loaded_paths'])} file(s) from CLI"
+            )
+            with st.expander("CLI-loaded files", expanded=False):
+                for path in st.session_state["cli_loaded_paths"]:
+                    st.write(path)
 
         st.markdown("---")
 
