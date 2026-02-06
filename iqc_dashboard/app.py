@@ -66,6 +66,28 @@ class DataManager:
         self.parquet_files = saved_paths
         return saved_paths
 
+    def load_parquet_paths(self, paths: List[str]) -> List[str]:
+        """Load Parquet files from local filesystem paths."""
+        resolved_paths: List[str] = []
+        for raw_path in paths:
+            path = Path(raw_path).expanduser()
+            if path.is_dir():
+                dir_files = sorted(path.glob("*.parquet"))
+                if not dir_files:
+                    st.warning(f"No parquet files found in directory: {path}")
+                for file_path in dir_files:
+                    resolved_paths.append(str(file_path))
+            elif path.is_file():
+                if path.suffix.lower() != ".parquet":
+                    st.warning(f"Skipping non-parquet file: {path}")
+                    continue
+                resolved_paths.append(str(path))
+            else:
+                st.warning(f"Path not found: {path}")
+
+        self.parquet_files = resolved_paths
+        return resolved_paths
+
     def _get_parquet_files_hash(self) -> str:
         """Generate a hash of parquet files for caching purposes."""
         if not self.parquet_files:
@@ -543,7 +565,7 @@ def render_molecule(xyz_string: str, style: str = "stick", label: str = "") -> N
 # ============================================================================
 
 
-def main():
+def main(data_paths: Optional[List[str]] = None):
     st.set_page_config(page_title="IQC Dashboard", page_icon="⚛️", layout="wide")
 
     st.title("⚛️ IQC Dashboard")
@@ -583,6 +605,12 @@ def main():
 
     data_manager = st.session_state.data_manager
 
+    if data_paths:
+        if st.session_state.get("cli_data_paths") != data_paths:
+            st.session_state["cli_data_paths"] = list(data_paths)
+            loaded_paths = data_manager.load_parquet_paths(data_paths)
+            st.session_state.data_loaded = bool(loaded_paths)
+
     # ========================================================================
     # Sidebar
     # ========================================================================
@@ -620,7 +648,7 @@ def main():
                 st.session_state.filter_text = ""
 
             # Reset filters button
-            if st.button("🔄 Reset All Filters", width="stretch"):
+            if st.button("🔄 Reset All Filters", use_container_width=True):
                 st.session_state.filter_formula = None
                 st.session_state.filter_converged = None
                 st.session_state.filter_smiles_changed = None
@@ -691,10 +719,28 @@ def main():
                 molecule_names = sorted(data_manager.get_all_molecule_names(parquet_hash))
 
             if molecule_names:
+                if st.session_state.get("selected_molecule_index") is None:
+                    st.session_state["selected_molecule_index"] = 0
+
+                # Clamp index in case filters changed the available list
+                st.session_state["selected_molecule_index"] = max(
+                    0,
+                    min(
+                        st.session_state["selected_molecule_index"],
+                        len(molecule_names) - 1,
+                    ),
+                )
+
                 selected_molecule = st.selectbox(
                     "Select Molecule",
                     options=molecule_names,
+                    index=st.session_state["selected_molecule_index"],
+                    key="selected_molecule_select",
                     help="Choose a molecule to inspect in detail (filtered by current filters)",
+                )
+
+                st.session_state["selected_molecule_index"] = molecule_names.index(
+                    selected_molecule
                 )
             else:
                 selected_molecule = None
@@ -846,6 +892,43 @@ def main():
                     opt_xyz = molecule_data.get("opt_xyz", None)
                     render_molecule(opt_xyz, style="stick", label="Optimized")
 
+                # Navigation controls
+                if molecule_names:
+                    current_index = st.session_state["selected_molecule_index"]
+
+                    def _go_prev():
+                        if st.session_state["selected_molecule_index"] > 0:
+                            st.session_state["selected_molecule_index"] -= 1
+
+                    def _go_next():
+                        if (
+                            st.session_state["selected_molecule_index"]
+                            < len(molecule_names) - 1
+                        ):
+                            st.session_state["selected_molecule_index"] += 1
+
+                    nav_col_left, nav_col_center, nav_col_right = st.columns([1, 2, 1])
+                    with nav_col_left:
+                        if st.button(
+                            "⬅️ Previous",
+                            use_container_width=True,
+                            disabled=current_index == 0,
+                            on_click=_go_prev,
+                        ):
+                            st.rerun()
+                    with nav_col_center:
+                        st.write(
+                            f"{current_index + 1} of {len(molecule_names)}",
+                        )
+                    with nav_col_right:
+                        if st.button(
+                            "Next ➡️",
+                            use_container_width=True,
+                            disabled=current_index == len(molecule_names) - 1,
+                            on_click=_go_next,
+                        ):
+                            st.rerun()
+
                 st.markdown("---")
 
                 # Metadata Table
@@ -892,7 +975,7 @@ def main():
                 if metadata_dict:
                     metadata_df = pd.DataFrame([metadata_dict]).T
                     metadata_df.columns = ["Value"]
-                    st.dataframe(metadata_df, width="stretch")
+                    st.dataframe(metadata_df, use_container_width=True)
             else:
                 st.warning(f"Molecule '{selected_molecule}' not found in dataset.")
         else:
@@ -957,7 +1040,7 @@ def main():
                     schema_display = schema.iloc[:, :2].copy()
                     schema_display.columns = ["Column Name", "Data Type"]
 
-                st.dataframe(schema_display, width="stretch")
+                st.dataframe(schema_display, use_container_width=True)
             else:
                 st.info("Schema information not available.")
 
@@ -1017,7 +1100,7 @@ def main():
                     name="y=x",
                 )
             )
-            st.plotly_chart(fig_scatter, width="stretch")
+            st.plotly_chart(fig_scatter, use_container_width=True)
         else:
             st.warning("Energy columns not available in dataset.")
 
@@ -1031,7 +1114,7 @@ def main():
                 labels={"opt_time": "Optimization Time (seconds)", "count": "Frequency"},
                 title="Distribution of Optimization Times",
             )
-            st.plotly_chart(fig_hist, width="stretch")
+            st.plotly_chart(fig_hist, use_container_width=True)
         else:
             st.warning("Optimization time data not available.")
 
@@ -1045,7 +1128,7 @@ def main():
                 labels={"number_of_atoms": "Number of Atoms", "count": "Frequency"},
                 title="Distribution of Number of Atoms",
             )
-            st.plotly_chart(fig_atoms, width="stretch")
+            st.plotly_chart(fig_atoms, use_container_width=True)
         else:
             st.warning("Number of atoms data not available.")
 
@@ -1058,7 +1141,7 @@ def main():
                 names=["Converged" if x else "Not Converged" for x in convergence_counts.index],
                 title="Convergence Status Distribution",
             )
-            st.plotly_chart(fig_pie, width="stretch")
+            st.plotly_chart(fig_pie, use_container_width=True)
         else:
             st.warning("Convergence data not available.")
 
@@ -1104,7 +1187,7 @@ def main():
                         yaxis_title="",
                         height=400,
                     )
-                    st.plotly_chart(fig_vib, width="stretch")
+                    st.plotly_chart(fig_vib, use_container_width=True)
                 else:
                     st.info("No vibrational frequency data available for selected molecule.")
             else:
