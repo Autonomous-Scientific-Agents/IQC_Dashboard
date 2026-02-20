@@ -787,7 +787,7 @@ def main(data_paths: Optional[List[str]] = None):
         return
 
     # Create tabs
-    tab1, tab2 = st.tabs(["🔬 Single Calculation", "📊 Dataset Analytics"])
+    tab1, tab2, tab3 = st.tabs(["🔬 Single Calculation", "📊 Dataset Analytics", "⚗️ Reactions"])
 
     # ========================================================================
     # Tab 1: Single Calculation
@@ -1207,6 +1207,27 @@ def main(data_paths: Optional[List[str]] = None):
         else:
             st.info("Vibrational frequency data not available in dataset.")
 
+    # ========================================================================
+    # Tab 3: Reactions
+    # ========================================================================
+
+    with tab3:
+        st.subheader("Reaction ΔG Analysis")
+        
+        # Load filtered data (same filters as analytics)
+        with st.spinner("Loading data for reactions..."):
+            df_reac = data_manager.get_filtered_data(
+                formula=st.session_state.get("filter_formula", None),
+                opt_converged=st.session_state.get("filter_converged", None),
+                smiles_changed=st.session_state.get("filter_smiles_changed", None),
+                number_of_imaginary_max=st.session_state.get("filter_max_imag", None),
+                text_filter=(
+                    st.session_state.get("filter_text", "")
+                    if st.session_state.get("filter_text", "")
+                    else None
+                ),
+                    limit=None,
+                )
 
 if __name__ == "__main__":
     main()
