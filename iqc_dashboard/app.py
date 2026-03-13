@@ -1508,7 +1508,7 @@ def main(data_paths: Optional[List[str]] = None):
                 )
 
                 fig_heatmap.update_layout(
-                    title="Carboxylation ΔG Heatmap (Lower is Better)",
+                    title="Carboxylation ΔG Heatmap",
                     width=1000,
                     height=600,
                     xaxis_tickangle=-45,
@@ -1592,35 +1592,51 @@ def main(data_paths: Optional[List[str]] = None):
                     col_rxn1, col_rxn2 = st.columns(2)
 
                     with col_rxn1:
-                        st.write("**Reactant:**")
+                        st.write("**Reactant**")
                         st.code(rxn.get("unique_name_reactant", "N/A"))
                         if rxn.get("unique_name_reactant"):
                             reactant_data = data_manager.get_molecule_by_name(
                                 rxn["unique_name_reactant"]
                             )
                             if reactant_data is not None:
-                                if pd.notna(reactant_data.get("initial_xyz")):
-                                    st.write("_Initial Structure_")
+                                # Show optimized geometry for reactant
+                                if pd.notna(reactant_data.get("opt_xyz")):
+                                    st.write("_Reactant (optimized) structure_")
+                                    render_molecule(
+                                        reactant_data.get("opt_xyz"),
+                                        style="stick",
+                                        label="Reactant Optimized",
+                                    )
+                                elif pd.notna(reactant_data.get("initial_xyz")):
+                                    st.write("_Fallback: Reactant initial geometry_")
                                     render_molecule(
                                         reactant_data.get("initial_xyz"),
                                         style="stick",
-                                        label="Reactant Initial",
+                                        label="Reactant Initial (Fallback)",
                                     )
 
                     with col_rxn2:
-                        st.write("**Product:**")
+                        st.write("**Product**")
                         st.code(rxn.get("unique_name_product", "N/A"))
                         if rxn.get("unique_name_product"):
                             product_data = data_manager.get_molecule_by_name(
                                 rxn["unique_name_product"]
                             )
                             if product_data is not None:
-                                if pd.notna(product_data.get("initial_xyz")):
-                                    st.write("_Optimized Structure_")
+                                # Show optimized geometry for product
+                                if pd.notna(product_data.get("opt_xyz")):
+                                    st.write("_Product (optimized) structure_")
                                     render_molecule(
                                         product_data.get("opt_xyz"),
                                         style="stick",
                                         label="Product Optimized",
+                                    )
+                                elif pd.notna(product_data.get("initial_xyz")):
+                                    st.write("_Fallback: Product initial geometry_")
+                                    render_molecule(
+                                        product_data.get("initial_xyz"),
+                                        style="stick",
+                                        label="Product Initial (Fallback)",
                                     )
 
                     st.markdown("---")
