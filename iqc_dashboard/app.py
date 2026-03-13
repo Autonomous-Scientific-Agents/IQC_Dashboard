@@ -611,6 +611,7 @@ def calculate_reaction_gibbs(df: pd.DataFrame) -> pd.DataFrame:
 
     Returns:
         pd.DataFrame: DataFrame with columns: bipyridine, alkyne, G_reactant, G_product, G_CO2, deltaG
+            All Gibbs energies are converted from eV to kcal/mol.
     """
     # Reset index to ensure concat works correctly
     df = df.reset_index(drop=True)
@@ -655,11 +656,17 @@ def calculate_reaction_gibbs(df: pd.DataFrame) -> pd.DataFrame:
         .rename(columns={"G_eV": "G_product", "unique_name": "unique_name_product"})
     )
 
+    # Convert from eV to kcal/mol
+    eV_to_kcalmol = 23.0605
+    G_CO2_kcal = G_CO2 * eV_to_kcalmol
+    reac["G_reactant"] = reac["G_reactant"] * eV_to_kcalmol
+    prod["G_product"] = prod["G_product"] * eV_to_kcalmol
+
     # Merge on bipyridine and alkyne (inner join shows complete reactions)
     delta = reac.merge(prod, on=["bipyridine", "alkyne"], how="inner")
 
-    delta["G_CO2"] = G_CO2
-    delta["deltaG"] = delta["G_product"] - (delta["G_reactant"] + G_CO2)
+    delta["G_CO2"] = G_CO2_kcal
+    delta["deltaG"] = delta["G_product"] - (delta["G_reactant"] + delta["G_CO2"])
 
     return delta
 
@@ -1491,7 +1498,7 @@ def main(data_paths: Optional[List[str]] = None):
                 # Create heatmap using plotly
                 fig_heatmap = px.imshow(
                     delta_pivot,
-                    labels=dict(x="Alkyne", y="Bipyridine", color="ΔG (eV)"),
+                    labels=dict(x="Alkyne", y="Bipyridine", color="ΔG (kcal/mol)"),
                     color_continuous_midpoint=0,
                     x=delta_pivot.columns,
                     y=delta_pivot.index,
@@ -1519,11 +1526,11 @@ def main(data_paths: Optional[List[str]] = None):
 
                 with col_stat2:
                     min_dg = delta_df["deltaG"].min()
-                    st.metric("Minimum ΔG (eV)", f"{min_dg:.4f}")
+                    st.metric("Minimum ΔG (kcal/mol)", f"{min_dg:.4f}")
 
                 with col_stat3:
                     max_dg = delta_df["deltaG"].max()
-                    st.metric("Maximum ΔG (eV)", f"{max_dg:.4f}")
+                    st.metric("Maximum ΔG (kcal/mol)", f"{max_dg:.4f}")
 
                 with col_stat4:
                     favorable = (delta_df["deltaG"] < 0).sum()
@@ -1566,16 +1573,16 @@ def main(data_paths: Optional[List[str]] = None):
                     col_info1, col_info2, col_info3 = st.columns(3)
 
                     with col_info1:
-                        st.metric("ΔG (eV)", f"{rxn['deltaG']:.4f}")
+                        st.metric("ΔG (kcal/mol)", f"{rxn['deltaG']:.4f}")
                         favorable = "✅ Favorable" if rxn["deltaG"] < 0 else "❌ Unfavorable"
                         st.write(favorable)
 
                     with col_info2:
-                        st.metric("G_reactant (eV)", f"{rxn['G_reactant']:.4f}")
-                        st.metric("G_product (eV)", f"{rxn['G_product']:.4f}")
+                        st.metric("G_reactant (kcal/mol)", f"{rxn['G_reactant']:.4f}")
+                        st.metric("G_product (kcal/mol)", f"{rxn['G_product']:.4f}")
 
                     with col_info3:
-                        st.metric("G_CO2 (eV)", f"{rxn['G_CO2']:.4f}")
+                        st.metric("G_CO2 (kcal/mol)", f"{rxn['G_CO2']:.4f}")
 
                     st.markdown("---")
 
@@ -1626,10 +1633,10 @@ def main(data_paths: Optional[List[str]] = None):
                             "Alkyne Substrate",
                             "Reactant Name",
                             "Product Name",
-                            "Reactant G (eV)",
-                            "Product G (eV)",
-                            "CO2 G (eV)",
-                            "ΔG (eV)",
+                            "Reactant G (kcal/mol)",
+                            "Product G (kcal/mol)",
+                            "CO2 G (kcal/mol)",
+                            "ΔG (kcal/mol)",
                             "Favorability",
                         ],
                         "Value": [
@@ -1656,7 +1663,7 @@ def main(data_paths: Optional[List[str]] = None):
                     delta_df,
                     x="deltaG",
                     nbins=30,
-                    labels={"deltaG": "ΔG (eV)", "count": "Frequency"},
+                    labels={"deltaG": "ΔG (kcal/mol)", "count": "Frequency"},
                     title="Distribution of Reaction ΔG Values",
                 )
 
