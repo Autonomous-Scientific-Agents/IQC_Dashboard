@@ -16,7 +16,6 @@ import re
 import difflib
 import html
 import hashlib
-import sys
 
 # Import 3D visualization libraries - will be checked when needed
 STMOL_AVAILABLE = False
