@@ -16,6 +16,7 @@ import re
 import difflib
 import html
 import hashlib
+import sys
 
 # Import 3D visualization libraries - will be checked when needed
 STMOL_AVAILABLE = False
@@ -144,6 +145,7 @@ class DataManager:
         opt_converged: Optional[bool] = None,
         smiles_changed: Optional[bool] = None,
         text_filter: Optional[str] = None,
+        number_of_imaginary_max: Optional[int] = None,
         limit: Optional[int] = None,
     ) -> pd.DataFrame:
         """Get filtered data with optional limit for performance."""
@@ -171,6 +173,9 @@ class DataManager:
         if smiles_changed is not None:
             conditions.append("smiles_changed = ?")
             params.append(smiles_changed)
+        if number_of_imaginary_max is not None:
+            conditions.append("number_of_imaginary <= ?")
+            params.append(number_of_imaginary_max)
 
         where_clause = " AND ".join(conditions) if conditions else ""
         limit_clause = f"LIMIT {limit}" if limit else ""
@@ -561,6 +566,112 @@ def render_molecule(xyz_string: str, style: str = "stick", label: str = "") -> N
 
 
 # ============================================================================
+# Reaction Analysis Helper Functions
+# ============================================================================
+
+
+def parse_unique_name(unique_name: str) -> dict:
+    """
+    Parse a unique_name string and extract bipyridine, alkyne, and role (reactant/product/co2).
+
+    Parameters:
+        unique_name (str): The unique name string to parse.
+
+    Returns:
+        dict: {'bipyridine': ..., 'alkyne': ..., 'role': 'reactant' or 'product' or 'co2'}
+    """
+    parts = unique_name.split("_")
+    result = {"bipyridine": None, "alkyne": None, "role": None}
+
+    # Check for CO2 first (case-insensitive)
+    if unique_name.lower().startswith("co2"):
+        result["role"] = "co2"
+        return result
+
+    # Standard parsing
+    if len(parts) >= 3:
+        result["bipyridine"] = parts[0].replace("bipy-", "")
+        result["alkyne"] = parts[1].replace("-C2H2-", "")
+
+        type_str = parts[2].lower()
+        if "product" in type_str:
+            result["role"] = "product"
+        elif "reactant" in type_str:
+            result["role"] = "reactant"
+
+    return result
+
+
+def calculate_reaction_gibbs(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate carboxylation reaction delta G values.
+
+    Parameters:
+        df (pd.DataFrame): DataFrame with unique_name and G_eV columns
+
+    Returns:
+        pd.DataFrame: DataFrame with columns: bipyridine, alkyne, G_reactant, G_product, G_CO2, deltaG
+            All Gibbs energies are converted from eV to kcal/mol.
+    """
+    # Reset index to ensure concat works correctly
+    df = df.reset_index(drop=True)
+
+    # Parse unique_name to extract reaction information
+    parsed = df["unique_name"].apply(parse_unique_name)
+    parsed_df = pd.DataFrame(parsed.tolist())
+
+    # Concatenate parsed data with original data
+    df2 = pd.concat([df, parsed_df], axis=1)
+
+    # Isolate CO2 before grouping (since it has None for bipy/alkyne)
+    df_co2 = df2[df2["role"] == "co2"]
+
+    if len(df_co2) == 0:
+        raise ValueError("No CO2 entries found — cannot compute ΔG.")
+
+    # Take the minimum G_eV for CO2
+    G_CO2 = df_co2["G_eV"].min()
+
+    # Process complexes (exclude CO2)
+    df_complexes = df2[df2["role"] != "co2"]
+
+    # For each (bipyridine, alkyne, role) combination, take lowest G conformer
+    group_cols = ["bipyridine", "alkyne", "role"]
+    idx_min = df_complexes.groupby(group_cols)["G_eV"].idxmin()
+    df_lowest = df_complexes.loc[idx_min].reset_index(drop=True)
+
+    # Extract reactants
+    reac = (
+        df_lowest[df_lowest["role"] == "reactant"][
+            ["bipyridine", "alkyne", "G_eV", "unique_name"]
+        ]
+        .rename(columns={"G_eV": "G_reactant", "unique_name": "unique_name_reactant"})
+    )
+
+    # Extract products
+    prod = (
+        df_lowest[df_lowest["role"] == "product"][
+            ["bipyridine", "alkyne", "G_eV", "unique_name"]
+        ]
+        .rename(columns={"G_eV": "G_product", "unique_name": "unique_name_product"})
+    )
+
+    # Convert from eV to kcal/mol
+    eV_to_kcalmol = 23.0605
+    G_CO2_kcal = G_CO2 * eV_to_kcalmol
+    reac["G_reactant"] = reac["G_reactant"] * eV_to_kcalmol
+    prod["G_product"] = prod["G_product"] * eV_to_kcalmol
+
+    # Merge on bipyridine and alkyne (inner join shows complete reactions)
+    delta = reac.merge(prod, on=["bipyridine", "alkyne"], how="inner")
+
+    delta["G_CO2"] = G_CO2_kcal
+    delta["deltaG"] = delta["G_product"] - (delta["G_reactant"] + delta["G_CO2"])
+
+    return delta
+
+
+# ============================================================================
 # Main Streamlit App
 # ============================================================================
 
@@ -656,6 +767,8 @@ def main(data_paths: Optional[List[str]] = None):
                 st.session_state.filter_converged = None
             if "filter_smiles_changed" not in st.session_state:
                 st.session_state.filter_smiles_changed = None
+            if "filter_max_imag" not in st.session_state:
+                st.session_state.filter_max_imag = None
             if "filter_text" not in st.session_state:
                 st.session_state.filter_text = ""
 
@@ -664,6 +777,7 @@ def main(data_paths: Optional[List[str]] = None):
                 st.session_state.filter_formula = None
                 st.session_state.filter_converged = None
                 st.session_state.filter_smiles_changed = None
+                st.session_state.filter_max_imag = None
                 st.session_state.filter_text = ""
                 st.rerun()
 
@@ -697,6 +811,20 @@ def main(data_paths: Optional[List[str]] = None):
             )
             st.session_state.filter_smiles_changed = selected_smiles_changed
 
+            # Imaginary frequency filter
+            max_imaginary = st.slider(
+                "Max Imaginary Frequencies",
+                min_value=0,
+                max_value=10,
+                value=None,
+                help="Filter to show only molecules with ≤ this many imaginary frequencies. None = No filter.",
+                key="filter_max_imag_slider",
+            )
+            if max_imaginary is not None:
+                st.session_state.filter_max_imag = max_imaginary
+            else:
+                st.session_state.filter_max_imag = None
+
             # Text-based regex filter
             text_filter = st.text_input(
                 "Text Filter (Regex)",
@@ -716,6 +844,7 @@ def main(data_paths: Optional[List[str]] = None):
                 formula=st.session_state.get("filter_formula", None),
                 opt_converged=st.session_state.get("filter_converged", None),
                 smiles_changed=st.session_state.get("filter_smiles_changed", None),
+                number_of_imaginary_max=st.session_state.get("filter_max_imag", None),
                 text_filter=(
                     st.session_state.get("filter_text", "")
                     if st.session_state.get("filter_text", "")
@@ -787,7 +916,7 @@ def main(data_paths: Optional[List[str]] = None):
         return
 
     # Create tabs
-    tab1, tab2 = st.tabs(["🔬 Single Calculation", "📊 Dataset Analytics"])
+    tab1, tab2, tab3 = st.tabs(["🔬 Single Calculation", "📊 Dataset Analytics", "⚗️ Reactions"])
 
     # ========================================================================
     # Tab 1: Single Calculation
@@ -1157,7 +1286,108 @@ def main(data_paths: Optional[List[str]] = None):
         else:
             st.warning("Convergence data not available.")
 
-        # Plot 5: Vibrational Frequencies (if available)
+        # Plot 4.5: Number of Electrons Distribution
+        st.subheader("Number of Electrons Distribution")
+        if "number_of_electrons" in df.columns:
+            fig_electrons = px.histogram(
+                df,
+                x="number_of_electrons",
+                nbins=30,
+                labels={"number_of_electrons": "Number of Electrons", "count": "Frequency"},
+                title="Distribution of Number of Electrons",
+            )
+            st.plotly_chart(fig_electrons, use_container_width=True)
+        else:
+            st.warning("Number of electrons data not available.")
+
+        # Plot 4.7: Symmetry Number Analysis
+        st.subheader("Symmetry Number Analysis")
+        col_sym1, col_sym2 = st.columns(2)
+        
+        with col_sym1:
+            if "initial_sym_number" in df.columns:
+                unique_init_sym = df["initial_sym_number"].dropna().unique()
+                st.write(f"**Unique Initial Symmetry Numbers:** {len(unique_init_sym)}")
+                st.write(f"Numbers: {sorted([int(x) for x in unique_init_sym if pd.notna(x)])}")
+                
+                fig_init_sym = px.histogram(
+                    df.dropna(subset=["initial_sym_number"]),
+                    x="initial_sym_number",
+                    nbins=20,
+                    labels={"initial_sym_number": "Initial Symmetry Number", "count": "Frequency"},
+                    title="Distribution of Initial Symmetry Numbers",
+                )
+                st.plotly_chart(fig_init_sym, use_container_width=True)
+            else:
+                st.warning("Initial symmetry number data not available.")
+        
+        with col_sym2:
+            if "opt_sym_number" in df.columns:
+                unique_opt_sym = df["opt_sym_number"].dropna().unique()
+                st.write(f"**Unique Optimized Symmetry Numbers:** {len(unique_opt_sym)}")
+                st.write(f"Numbers: {sorted([int(x) for x in unique_opt_sym if pd.notna(x)])}")
+                
+                fig_opt_sym = px.histogram(
+                    df.dropna(subset=["opt_sym_number"]),
+                    x="opt_sym_number",
+                    nbins=20,
+                    labels={"opt_sym_number": "Optimized Symmetry Number", "count": "Frequency"},
+                    title="Distribution of Optimized Symmetry Numbers",
+                )
+                st.plotly_chart(fig_opt_sym, use_container_width=True)
+            else:
+                st.warning("Optimized symmetry number data not available.")
+
+        # Plot 4.8: Unique SMILES Count
+        st.subheader("SMILES Uniqueness Analysis")
+        col_smiles1, col_smiles2 = st.columns(2)
+        
+        with col_smiles1:
+            if "initial_smiles" in df.columns:
+                unique_init_smiles = df["initial_smiles"].nunique()
+                total_rows = len(df)
+                st.metric("Unique Initial SMILES", int(unique_init_smiles))
+                st.metric("Total Rows", int(total_rows))
+                st.metric("Percentage Unique", f"{(unique_init_smiles/total_rows)*100:.1f}%")
+        
+        with col_smiles2:
+            if "opt_smiles" in df.columns:
+                unique_opt_smiles = df["opt_smiles"].nunique()
+                total_rows = len(df)
+                st.metric("Unique Optimized SMILES", int(unique_opt_smiles))
+                st.metric("Total Rows", int(total_rows))
+                st.metric("Percentage Unique", f"{(unique_opt_smiles/total_rows)*100:.1f}%")
+        
+        # Plot 5: Correlation Heatmap
+        st.subheader("Correlation Matrix of Numerical Columns")
+        
+        # Select numerical columns for correlation
+        numerical_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        
+        if len(numerical_cols) > 1:
+            # Limit correlation to first 15 numerical columns for readability
+            cols_for_corr = numerical_cols[:15]
+            corr_matrix = df[cols_for_corr].corr()
+            
+            fig_corr = px.imshow(
+                corr_matrix,
+                labels=dict(color="Correlation"),
+                x=corr_matrix.columns,
+                y=corr_matrix.columns,
+                color_continuous_scale="RdBu",
+                color_continuous_midpoint=0,
+                aspect="auto",
+                title="Correlation Matrix (First 15 Numerical Columns)",
+            )
+            fig_corr.update_layout(
+                xaxis_tickangle=-45,
+                height=700,
+                width=800,
+            )
+            st.plotly_chart(fig_corr, use_container_width=True)
+        else:
+            st.info("Not enough numerical columns for correlation analysis.")
+
         st.subheader("Vibrational Frequencies Analysis")
         if "vibrational_frequencies_cm^-1" in df.columns:
             # Get a sample molecule for frequency analysis
@@ -1206,6 +1436,264 @@ def main(data_paths: Optional[List[str]] = None):
                 st.info("Please select a molecule to view its vibrational frequencies.")
         else:
             st.info("Vibrational frequency data not available in dataset.")
+
+    # ========================================================================
+    # Tab 3: Reactions
+    # ========================================================================
+
+    with tab3:
+        st.subheader("⚗️ Carboxylation Reaction ΔG Analysis")
+
+        # Load filtered data (same filters as analytics)
+        with st.spinner("Loading data for reactions..."):
+            df_reac = data_manager.get_filtered_data(
+                formula=st.session_state.get("filter_formula", None),
+                opt_converged=st.session_state.get("filter_converged", None),
+                smiles_changed=st.session_state.get("filter_smiles_changed", None),
+                number_of_imaginary_max=st.session_state.get("filter_max_imag", None),
+                text_filter=(
+                    st.session_state.get("filter_text", "")
+                    if st.session_state.get("filter_text", "")
+                    else None
+                ),
+                limit=None,
+            )
+
+        if df_reac.empty:
+            st.warning("No reaction data available with current filters.")
+            st.info("💡 Try adjusting filters or uploading reaction data files.")
+            return
+
+        # Check for required columns
+        if "G_eV" not in df_reac.columns:
+            st.error("Dataset does not contain 'G_eV' (Gibbs energy) column.")
+            return
+
+        if "unique_name" not in df_reac.columns:
+            st.error("Dataset does not contain 'unique_name' column.")
+            return
+
+        st.markdown("---")
+
+        try:
+            # Calculate reaction delta G values
+            with st.spinner("Calculating reaction ΔG values..."):
+                delta_df = calculate_reaction_gibbs(df_reac)
+
+            if delta_df.empty:
+                st.warning("No complete reactions found (missing reactant, product, or CO2).")
+                st.info("Please ensure dataset contains entries with roles: 'reactant', 'product', and 'co2'.")
+            else:
+                # Create the delta G heatmap
+                st.subheader("ΔG Heatmap: Bipyridine vs Alkyne")
+
+                # Create pivot table for heatmap
+                delta_pivot = delta_df.pivot_table(
+                    index="bipyridine",
+                    columns="alkyne",
+                    values="deltaG",
+                    aggfunc="mean"  # In case of multiple entries, take mean
+                )
+
+                # Create heatmap using plotly
+                fig_heatmap = px.imshow(
+                    delta_pivot,
+                    labels=dict(x="Alkyne", y="Bipyridine", color="ΔG (kcal/mol)"),
+                    color_continuous_midpoint=0,
+                    x=delta_pivot.columns,
+                    y=delta_pivot.index,
+                    color_continuous_scale="RdYlGn_r",  # Red (positive) to Green (negative)
+                    aspect="auto",
+                    origin="lower",
+                )
+
+                fig_heatmap.update_layout(
+                    title="Carboxylation ΔG Heatmap",
+                    width=1000,
+                    height=600,
+                    xaxis_tickangle=-45,
+                )
+
+                st.plotly_chart(fig_heatmap, use_container_width=True)
+
+                st.markdown("---")
+
+                # Display reaction statistics
+                col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+
+                with col_stat1:
+                    st.metric("Total Reactions", len(delta_df))
+
+                with col_stat2:
+                    min_dg = delta_df["deltaG"].min()
+                    st.metric("Minimum ΔG (kcal/mol)", f"{min_dg:.4f}")
+
+                with col_stat3:
+                    max_dg = delta_df["deltaG"].max()
+                    st.metric("Maximum ΔG (kcal/mol)", f"{max_dg:.4f}")
+
+                with col_stat4:
+                    favorable = (delta_df["deltaG"] < 0).sum()
+                    st.metric("Favorable Reactions", int(favorable))
+
+                st.markdown("---")
+
+                # Detailed Reaction Exploration
+                st.subheader("Explore Individual Reactions")
+
+                # Create columns for alkyne and bipyridine selection
+                col_sel1, col_sel2 = st.columns(2)
+
+                with col_sel1:
+                    selected_bipy = st.selectbox(
+                        "Select Bipyridine Ligand",
+                        options=sorted(delta_df["bipyridine"].unique()),
+                        key="reaction_bipy_select",
+                    )
+
+                with col_sel2:
+                    selected_alkyne = st.selectbox(
+                        "Select Alkyne",
+                        options=sorted(delta_df[delta_df["bipyridine"] == selected_bipy]["alkyne"].unique()),
+                        key="reaction_alkyne_select",
+                    )
+
+                # Get the selected reaction
+                selected_reaction = delta_df[
+                    (delta_df["bipyridine"] == selected_bipy)
+                    & (delta_df["alkyne"] == selected_alkyne)
+                ]
+
+                if not selected_reaction.empty:
+                    rxn = selected_reaction.iloc[0]
+
+                    st.subheader(f"Reaction: {selected_bipy} + {selected_alkyne}")
+
+                    # Display reaction information
+                    col_info1, col_info2, col_info3 = st.columns(3)
+
+                    with col_info1:
+                        st.metric("ΔG (kcal/mol)", f"{rxn['deltaG']:.4f}")
+                        favorable = "✅ Favorable" if rxn["deltaG"] < 0 else "❌ Unfavorable"
+                        st.write(favorable)
+
+                    with col_info2:
+                        st.metric("G_reactant (kcal/mol)", f"{rxn['G_reactant']:.4f}")
+                        st.metric("G_product (kcal/mol)", f"{rxn['G_product']:.4f}")
+
+                    with col_info3:
+                        st.metric("G_CO2 (kcal/mol)", f"{rxn['G_CO2']:.4f}")
+
+                    st.markdown("---")
+
+                    # Show molecule names for reactant and product
+                    st.subheader("Reaction Components")
+
+                    col_rxn1, col_rxn2 = st.columns(2)
+
+                    with col_rxn1:
+                        st.write("**Reactant**")
+                        st.code(rxn.get("unique_name_reactant", "N/A"))
+                        if rxn.get("unique_name_reactant"):
+                            reactant_data = data_manager.get_molecule_by_name(
+                                rxn["unique_name_reactant"]
+                            )
+                            if reactant_data is not None:
+                                # Show optimized geometry for reactant
+                                if pd.notna(reactant_data.get("opt_xyz")):
+                                    st.write("_Reactant (optimized) structure_")
+                                    render_molecule(
+                                        reactant_data.get("opt_xyz"),
+                                        style="stick",
+                                        label="Reactant Optimized",
+                                    )
+                                elif pd.notna(reactant_data.get("initial_xyz")):
+                                    st.write("_Fallback: Reactant initial geometry_")
+                                    render_molecule(
+                                        reactant_data.get("initial_xyz"),
+                                        style="stick",
+                                        label="Reactant Initial (Fallback)",
+                                    )
+
+                    with col_rxn2:
+                        st.write("**Product**")
+                        st.code(rxn.get("unique_name_product", "N/A"))
+                        if rxn.get("unique_name_product"):
+                            product_data = data_manager.get_molecule_by_name(
+                                rxn["unique_name_product"]
+                            )
+                            if product_data is not None:
+                                # Show optimized geometry for product
+                                if pd.notna(product_data.get("opt_xyz")):
+                                    st.write("_Product (optimized) structure_")
+                                    render_molecule(
+                                        product_data.get("opt_xyz"),
+                                        style="stick",
+                                        label="Product Optimized",
+                                    )
+                                elif pd.notna(product_data.get("initial_xyz")):
+                                    st.write("_Fallback: Product initial geometry_")
+                                    render_molecule(
+                                        product_data.get("initial_xyz"),
+                                        style="stick",
+                                        label="Product Initial (Fallback)",
+                                    )
+
+                    st.markdown("---")
+
+                    # Show detailed summary table
+                    st.subheader("Reaction Summary")
+                    summary_data = {
+                        "Property": [
+                            "Bipyridine Ligand",
+                            "Alkyne Substrate",
+                            "Reactant Name",
+                            "Product Name",
+                            "Reactant G (kcal/mol)",
+                            "Product G (kcal/mol)",
+                            "CO2 G (kcal/mol)",
+                            "ΔG (kcal/mol)",
+                            "Favorability",
+                        ],
+                        "Value": [
+                            selected_bipy,
+                            selected_alkyne,
+                            rxn.get("unique_name_reactant", "N/A"),
+                            rxn.get("unique_name_product", "N/A"),
+                            f"{rxn['G_reactant']:.6f}",
+                            f"{rxn['G_product']:.6f}",
+                            f"{rxn['G_CO2']:.6f}",
+                            f"{rxn['deltaG']:.6f}",
+                            "✅ Favorable (ΔG < 0)" if rxn["deltaG"] < 0 else "❌ Unfavorable (ΔG > 0)",
+                        ],
+                    }
+                    summary_df = pd.DataFrame(summary_data)
+                    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+                st.markdown("---")
+
+                # Distribution of ΔG values
+                st.subheader("ΔG Distribution")
+
+                fig_deltag = px.histogram(
+                    delta_df,
+                    x="deltaG",
+                    nbins=30,
+                    labels={"deltaG": "ΔG (kcal/mol)", "count": "Frequency"},
+                    title="Distribution of Reaction ΔG Values",
+                )
+
+                # Add a vertical line at ΔG = 0
+                fig_deltag.add_vline(x=0, line_dash="dash", line_color="red", annotation_text="ΔG=0")
+
+                st.plotly_chart(fig_deltag, use_container_width=True)
+
+        except ValueError as ve:
+            st.error(f"Error processing reactions: {ve}")
+            st.info("Please ensure the dataset contains CO2, reactant, and product entries.")
+        except Exception as e:
+            st.error(f"Unexpected error in reactions analysis: {e}")
+            st.info("Please check your data format and try again.")
 
 
 if __name__ == "__main__":

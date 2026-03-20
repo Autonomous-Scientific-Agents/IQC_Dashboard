@@ -1,6 +1,7 @@
 """Tests for DataManager class."""
 
 import pandas as pd
+import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch
 import sys
@@ -8,7 +9,7 @@ import sys
 # Add parent directory to path to import the module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from iqc_dashboard.app import DataManager
+from iqc_dashboard.app import DataManager, calculate_reaction_gibbs
 
 
 class TestDataManager:
@@ -269,3 +270,32 @@ class TestDataManager:
                 assert "mol_001" in names
                 assert "mol_002" in names
                 assert "mol_003" in names
+
+    def test_calculate_reaction_gibbs_kcal_conversion(self):
+        """Test reaction Gibbs calculation converts eV to kcal/mol and computes ΔG."""
+        test_df = pd.DataFrame(
+            {
+                # parse_unique_name expects underscore-separated name elements
+                "unique_name": ["bipy-A_C2H2_reactant", "bipy-A_C2H2_product", "CO2"],
+                "G_eV": [0.0, 1.0, -0.5],
+            }
+        )
+
+        result = calculate_reaction_gibbs(test_df)
+
+        assert "deltaG" in result.columns
+        assert "G_reactant" in result.columns
+        assert "G_product" in result.columns
+        assert "G_CO2" in result.columns
+
+        # Check conversion from eV to kcal/mol: 1 eV ~ 23.0605 kcal/mol
+        expected_reactant = 0.0 * 23.0605
+        expected_product = 1.0 * 23.0605
+        expected_co2 = -0.5 * 23.0605
+        expected_delta = expected_product - (expected_reactant + expected_co2)
+
+        assert result["G_reactant"].iloc[0] == pytest.approx(expected_reactant)
+        assert result["G_product"].iloc[0] == pytest.approx(expected_product)
+        assert result["G_CO2"].iloc[0] == pytest.approx(expected_co2)
+        assert result["deltaG"].iloc[0] == pytest.approx(expected_delta)
+
