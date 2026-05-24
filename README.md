@@ -166,6 +166,11 @@ After installation, you can run the dashboard in several ways:
 ```bash
 iqc-dashboard
 ```
+If port `8501` is already in use, the command automatically starts on the next
+available port. To request a specific port:
+```bash
+iqc-dashboard --port 8502
+```
 
 **Option 2: Using Streamlit directly**
 ```bash
@@ -436,4 +441,3 @@ Built with:
 - [Plotly](https://plotly.com/python/)
 
 Designed to visualize output from [IQC (Interactive Quantum Chemistry)](https://github.com/Autonomous-Scientific-Agents/IQC).
-
