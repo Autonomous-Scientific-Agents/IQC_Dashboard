@@ -607,6 +607,61 @@ def _get_first_present(mapping, keys: Tuple[str, ...]):
     return None
 
 
+def sync_indexed_selection(
+    session_state,
+    options: List[str],
+    selection_key: str,
+    index_key: Optional[str] = None,
+) -> int:
+    """Keep a selectbox value and optional selected index aligned."""
+    if not options:
+        if index_key is not None:
+            session_state[index_key] = None
+        return 0
+
+    selected_value = session_state.get(selection_key)
+    if selected_value in options:
+        selected_index = options.index(selected_value)
+    else:
+        selected_index = session_state.get(index_key, 0) if index_key is not None else 0
+        if selected_index is None:
+            selected_index = 0
+        selected_index = max(0, min(int(selected_index), len(options) - 1))
+        session_state[selection_key] = options[selected_index]
+
+    if index_key is not None:
+        session_state[index_key] = selected_index
+
+    return selected_index
+
+
+def move_indexed_selection(
+    session_state,
+    options: List[str],
+    selection_key: str,
+    step: int,
+    index_key: Optional[str] = None,
+) -> int:
+    """Move a selectbox-backed selection by step and persist both value and index."""
+    if not options:
+        if index_key is not None:
+            session_state[index_key] = None
+        return 0
+
+    current_index = sync_indexed_selection(
+        session_state,
+        options,
+        selection_key,
+        index_key,
+    )
+    next_index = max(0, min(current_index + step, len(options) - 1))
+    session_state[selection_key] = options[next_index]
+    if index_key is not None:
+        session_state[index_key] = next_index
+
+    return next_index
+
+
 def create_ir_spectrum_plot(
     frequencies,
     intensities,
@@ -1227,22 +1282,17 @@ def main(data_paths: Optional[List[str]] = None):
                 molecule_names = sorted(data_manager.get_all_molecule_names(parquet_hash))
 
             if molecule_names:
-                if st.session_state.get("selected_molecule_index") is None:
-                    st.session_state["selected_molecule_index"] = 0
-
-                # Clamp index in case filters changed the available list
-                st.session_state["selected_molecule_index"] = max(
-                    0,
-                    min(
-                        st.session_state["selected_molecule_index"],
-                        len(molecule_names) - 1,
-                    ),
+                selected_molecule_index = sync_indexed_selection(
+                    st.session_state,
+                    molecule_names,
+                    "selected_molecule_select",
+                    "selected_molecule_index",
                 )
 
                 selected_molecule = st.selectbox(
                     "Select Molecule",
                     options=molecule_names,
-                    index=st.session_state["selected_molecule_index"],
+                    index=selected_molecule_index,
                     key="selected_molecule_select",
                     help="Choose a molecule to inspect in detail (filtered by current filters)",
                 )
@@ -1347,6 +1397,12 @@ def main(data_paths: Optional[List[str]] = None):
                         if selected_molecule in single_calc_molecule_names
                         else single_calc_molecule_names[0]
                     )
+
+                sync_indexed_selection(
+                    st.session_state,
+                    single_calc_molecule_names,
+                    "single_calc_molecule_select",
+                )
 
                 displayed_molecule = st.selectbox(
                     "Select Calculation",
@@ -1512,35 +1568,40 @@ def main(data_paths: Optional[List[str]] = None):
                         current_index = single_calc_molecule_names.index(displayed_molecule)
 
                         def _go_prev():
-                            current_idx = single_calc_molecule_names.index(
-                                st.session_state["single_calc_molecule_select"]
+                            move_indexed_selection(
+                                st.session_state,
+                                single_calc_molecule_names,
+                                "single_calc_molecule_select",
+                                -1,
                             )
-                            if current_idx > 0:
-                                st.session_state["single_calc_molecule_select"] = (
-                                    single_calc_molecule_names[current_idx - 1]
-                                )
 
                         def _go_next():
-                            current_idx = single_calc_molecule_names.index(
-                                st.session_state["single_calc_molecule_select"]
+                            move_indexed_selection(
+                                st.session_state,
+                                single_calc_molecule_names,
+                                "single_calc_molecule_select",
+                                1,
                             )
-                            if current_idx < len(single_calc_molecule_names) - 1:
-                                st.session_state["single_calc_molecule_select"] = (
-                                    single_calc_molecule_names[current_idx + 1]
-                                )
                     else:
                         current_index = st.session_state["selected_molecule_index"]
 
                         def _go_prev():
-                            if st.session_state["selected_molecule_index"] > 0:
-                                st.session_state["selected_molecule_index"] -= 1
+                            move_indexed_selection(
+                                st.session_state,
+                                single_calc_molecule_names,
+                                "selected_molecule_select",
+                                -1,
+                                "selected_molecule_index",
+                            )
 
                         def _go_next():
-                            if (
-                                st.session_state["selected_molecule_index"]
-                                < len(single_calc_molecule_names) - 1
-                            ):
-                                st.session_state["selected_molecule_index"] += 1
+                            move_indexed_selection(
+                                st.session_state,
+                                single_calc_molecule_names,
+                                "selected_molecule_select",
+                                1,
+                                "selected_molecule_index",
+                            )
 
                     nav_col_left, nav_col_center, nav_col_right = st.columns([1, 2, 1])
                     with nav_col_left:
