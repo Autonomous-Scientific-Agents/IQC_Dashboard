@@ -17,6 +17,11 @@ import difflib
 import html
 import hashlib
 
+EV_TO_KCAL_MOL = 23.0605
+ENERGY_UNIT_KCAL = "kcal/mol"
+ENERGY_UNIT_EV = "eV"
+ENERGY_UNITS = [ENERGY_UNIT_KCAL, ENERGY_UNIT_EV]
+
 # Import 3D visualization libraries - will be checked when needed
 STMOL_AVAILABLE = False
 PY3DMOL_AVAILABLE = False
@@ -662,6 +667,62 @@ def move_indexed_selection(
     return next_index
 
 
+def validate_energy_unit(energy_unit: str) -> str:
+    """Validate and return a supported display energy unit."""
+    if energy_unit not in ENERGY_UNITS:
+        raise ValueError(f"Unsupported energy unit: {energy_unit}")
+    return energy_unit
+
+
+def energy_conversion_factor(energy_unit: str) -> float:
+    """Return the multiplier for converting eV values to the selected unit."""
+    validate_energy_unit(energy_unit)
+    if energy_unit == ENERGY_UNIT_KCAL:
+        return EV_TO_KCAL_MOL
+    return 1.0
+
+
+def convert_energy_value(value, energy_unit: str) -> Optional[float]:
+    """Convert a scalar eV value to the selected display unit."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    return float(value) * energy_conversion_factor(energy_unit)
+
+
+def convert_energy_series(series: pd.Series, energy_unit: str) -> pd.Series:
+    """Convert a pandas Series of eV values to the selected display unit."""
+    return pd.to_numeric(series, errors="coerce") * energy_conversion_factor(energy_unit)
+
+
+def format_energy_value(value, energy_unit: str, precision: int = 4) -> str:
+    """Format a scalar eV value in the selected display unit."""
+    converted = convert_energy_value(value, energy_unit)
+    if converted is None:
+        return "N/A"
+    return f"{converted:.{precision}f} {energy_unit}"
+
+
+def energy_metadata_label(column_name: str, energy_unit: str) -> str:
+    """Convert an eV-backed metadata column name into a selected-unit display label."""
+    validate_energy_unit(energy_unit)
+    if column_name == "S_eV/K":
+        return f"S ({energy_unit}/K)" if energy_unit == ENERGY_UNIT_KCAL else "S (eV/K)"
+    if column_name.endswith("_eV"):
+        return f"{column_name[:-3]} ({energy_unit})"
+    return column_name
+
+
+def is_energy_metadata_column(column_name: str) -> bool:
+    """Return True for scalar metadata columns backed by eV values."""
+    return column_name.endswith("_eV") or column_name == "S_eV/K"
+
+
 def create_ir_spectrum_plot(
     frequencies,
     intensities,
@@ -998,17 +1059,24 @@ def parse_unique_name(unique_name: str) -> dict:
     return result
 
 
-def calculate_reaction_gibbs(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_reaction_gibbs(
+    df: pd.DataFrame,
+    energy_unit: str = ENERGY_UNIT_KCAL,
+) -> pd.DataFrame:
     """
     Calculate carboxylation reaction delta G values.
 
     Parameters:
         df (pd.DataFrame): DataFrame with unique_name and G_eV columns
+        energy_unit (str): Output energy unit, either "kcal/mol" or "eV".
 
     Returns:
-        pd.DataFrame: DataFrame with columns: bipyridine, alkyne, G_reactant, G_product, G_CO2, deltaG
-            All Gibbs energies are converted from eV to kcal/mol.
+        pd.DataFrame: DataFrame with columns: bipyridine, alkyne, G_reactant,
+            G_product, G_CO2, deltaG
+            All Gibbs energies are converted from eV to the requested output unit.
     """
+    unit_factor = energy_conversion_factor(energy_unit)
+
     # Reset index to ensure concat works correctly
     df = df.reset_index(drop=True)
 
@@ -1052,16 +1120,15 @@ def calculate_reaction_gibbs(df: pd.DataFrame) -> pd.DataFrame:
         .rename(columns={"G_eV": "G_product", "unique_name": "unique_name_product"})
     )
 
-    # Convert from eV to kcal/mol
-    eV_to_kcalmol = 23.0605
-    G_CO2_kcal = G_CO2 * eV_to_kcalmol
-    reac["G_reactant"] = reac["G_reactant"] * eV_to_kcalmol
-    prod["G_product"] = prod["G_product"] * eV_to_kcalmol
+    # Convert from eV to the selected display unit.
+    G_CO2_display = G_CO2 * unit_factor
+    reac["G_reactant"] = reac["G_reactant"] * unit_factor
+    prod["G_product"] = prod["G_product"] * unit_factor
 
     # Merge on bipyridine and alkyne (inner join shows complete reactions)
     delta = reac.merge(prod, on=["bipyridine", "alkyne"], how="inner")
 
-    delta["G_CO2"] = G_CO2_kcal
+    delta["G_CO2"] = G_CO2_display
     delta["deltaG"] = delta["G_product"] - (delta["G_reactant"] + delta["G_CO2"])
 
     return delta
@@ -1102,6 +1169,14 @@ def main(data_paths: Optional[List[str]] = None):
     st.set_page_config(page_title="IQC Dashboard", page_icon="⚛️", layout="wide")
 
     st.title("⚛️ IQC Dashboard")
+
+    energy_unit = st.radio(
+        "Energy units",
+        options=ENERGY_UNITS,
+        index=0,
+        horizontal=True,
+        key="energy_unit_select",
+    )
 
     # Diagnostic information (can be hidden with expander)
     with st.expander("🔧 Diagnostic Information", expanded=False):
@@ -1434,16 +1509,10 @@ def main(data_paths: Optional[List[str]] = None):
                 col3, col4 = st.columns(2)
                 with col3:
                     initial_energy = molecule_data.get("initial_energy_eV", None)
-                    if initial_energy is not None:
-                        st.metric("Initial Energy", f"{initial_energy:.4f} eV")
-                    else:
-                        st.metric("Initial Energy", "N/A")
+                    st.metric("Initial Energy", format_energy_value(initial_energy, energy_unit))
                 with col4:
                     energy = molecule_data.get("opt_energy_eV", None)
-                    if energy is not None:
-                        st.metric("Optimized Energy", f"{energy:.4f} eV")
-                    else:
-                        st.metric("Optimized Energy", "N/A")
+                    st.metric("Optimized Energy", format_energy_value(energy, energy_unit))
 
                 # Row 3: Connectivity Info (SMILES strings)
                 st.markdown("---")
@@ -1560,7 +1629,10 @@ def main(data_paths: Optional[List[str]] = None):
                         else:
                             st.info("No vibrational mode table available for this calculation.")
                 else:
-                    st.info("No IR spectrum or vibrational frequency data available for this calculation.")
+                    st.info(
+                        "No IR spectrum or vibrational frequency data available "
+                        "for this calculation."
+                    )
 
                 # Navigation controls
                 if single_calc_molecule_names:
@@ -1663,10 +1735,17 @@ def main(data_paths: Optional[List[str]] = None):
                         value = molecule_data[col]
                         if pd.notna(value):
                             # Convert to string to avoid Arrow serialization issues with mixed types
+                            display_col = energy_metadata_label(col, energy_unit)
                             if isinstance(value, (list, np.ndarray)):
-                                metadata_dict[col] = str(value)
+                                metadata_dict[display_col] = str(value)
+                            elif is_energy_metadata_column(col):
+                                metadata_dict[display_col] = format_energy_value(
+                                    value,
+                                    energy_unit,
+                                    precision=6,
+                                )
                             else:
-                                metadata_dict[col] = str(value)
+                                metadata_dict[display_col] = str(value)
 
                 if metadata_dict:
                     metadata_df = pd.DataFrame([metadata_dict]).T
@@ -1771,22 +1850,37 @@ def main(data_paths: Optional[List[str]] = None):
         # Plot 1: Energy Comparison Scatter Plot
         st.subheader("Energy Comparison: Initial vs Optimized")
         if "initial_energy_eV" in df.columns and "opt_energy_eV" in df.columns:
+            energy_plot_df = df.copy()
+            energy_plot_df["initial_energy_display"] = convert_energy_series(
+                energy_plot_df["initial_energy_eV"],
+                energy_unit,
+            )
+            energy_plot_df["opt_energy_display"] = convert_energy_series(
+                energy_plot_df["opt_energy_eV"],
+                energy_unit,
+            )
             fig_scatter = px.scatter(
-                df,
-                x="initial_energy_eV",
-                y="opt_energy_eV",
+                energy_plot_df,
+                x="initial_energy_display",
+                y="opt_energy_display",
                 color="opt_converged",
                 hover_data=["formula", "unique_name"],
                 labels={
-                    "initial_energy_eV": "Initial Energy (eV)",
-                    "opt_energy_eV": "Optimized Energy (eV)",
+                    "initial_energy_display": f"Initial Energy ({energy_unit})",
+                    "opt_energy_display": f"Optimized Energy ({energy_unit})",
                     "opt_converged": "Converged",
                 },
                 title="Initial vs Optimized Energy",
             )
             # Add diagonal line
-            min_energy = min(df["initial_energy_eV"].min(), df["opt_energy_eV"].min())
-            max_energy = max(df["initial_energy_eV"].max(), df["opt_energy_eV"].max())
+            min_energy = min(
+                energy_plot_df["initial_energy_display"].min(),
+                energy_plot_df["opt_energy_display"].min(),
+            )
+            max_energy = max(
+                energy_plot_df["initial_energy_display"].max(),
+                energy_plot_df["opt_energy_display"].max(),
+            )
             fig_scatter.add_trace(
                 go.Scatter(
                     x=[min_energy, max_energy],
@@ -1971,7 +2065,10 @@ def main(data_paths: Optional[List[str]] = None):
                 if fig_vib is not None:
                     st.plotly_chart(fig_vib, use_container_width=True)
                 else:
-                    st.info("No IR spectrum or vibrational frequency data available for selected molecule.")
+                    st.info(
+                        "No IR spectrum or vibrational frequency data available "
+                        "for selected molecule."
+                    )
             else:
                 st.info("Please select a molecule to view its IR spectrum.")
         else:
@@ -2018,7 +2115,7 @@ def main(data_paths: Optional[List[str]] = None):
         try:
             # Calculate reaction delta G values
             with st.spinner("Calculating reaction ΔG values..."):
-                delta_df = calculate_reaction_gibbs(df_reac)
+                delta_df = calculate_reaction_gibbs(df_reac, energy_unit=energy_unit)
 
             if delta_df.empty:
                 st.warning("No complete reactions found (missing reactant, product, or CO2).")
@@ -2038,7 +2135,7 @@ def main(data_paths: Optional[List[str]] = None):
                 # Create heatmap using plotly
                 fig_heatmap = px.imshow(
                     delta_pivot,
-                    labels=dict(x="Alkyne", y="Bipyridine", color="ΔG (kcal/mol)"),
+                    labels=dict(x="Alkyne", y="Bipyridine", color=f"ΔG ({energy_unit})"),
                     color_continuous_midpoint=0,
                     x=delta_pivot.columns,
                     y=delta_pivot.index,
@@ -2066,11 +2163,11 @@ def main(data_paths: Optional[List[str]] = None):
 
                 with col_stat2:
                     min_dg = delta_df["deltaG"].min()
-                    st.metric("Minimum ΔG (kcal/mol)", f"{min_dg:.4f}")
+                    st.metric(f"Minimum ΔG ({energy_unit})", f"{min_dg:.4f}")
 
                 with col_stat3:
                     max_dg = delta_df["deltaG"].max()
-                    st.metric("Maximum ΔG (kcal/mol)", f"{max_dg:.4f}")
+                    st.metric(f"Maximum ΔG ({energy_unit})", f"{max_dg:.4f}")
 
                 with col_stat4:
                     favorable = (delta_df["deltaG"] < 0).sum()
@@ -2113,16 +2210,16 @@ def main(data_paths: Optional[List[str]] = None):
                     col_info1, col_info2, col_info3 = st.columns(3)
 
                     with col_info1:
-                        st.metric("ΔG (kcal/mol)", f"{rxn['deltaG']:.4f}")
+                        st.metric(f"ΔG ({energy_unit})", f"{rxn['deltaG']:.4f}")
                         favorable = "✅ Favorable" if rxn["deltaG"] < 0 else "❌ Unfavorable"
                         st.write(favorable)
 
                     with col_info2:
-                        st.metric("G_reactant (kcal/mol)", f"{rxn['G_reactant']:.4f}")
-                        st.metric("G_product (kcal/mol)", f"{rxn['G_product']:.4f}")
+                        st.metric(f"G_reactant ({energy_unit})", f"{rxn['G_reactant']:.4f}")
+                        st.metric(f"G_product ({energy_unit})", f"{rxn['G_product']:.4f}")
 
                     with col_info3:
-                        st.metric("G_CO2 (kcal/mol)", f"{rxn['G_CO2']:.4f}")
+                        st.metric(f"G_CO2 ({energy_unit})", f"{rxn['G_CO2']:.4f}")
 
                     st.markdown("---")
 
@@ -2189,10 +2286,10 @@ def main(data_paths: Optional[List[str]] = None):
                             "Alkyne Substrate",
                             "Reactant Name",
                             "Product Name",
-                            "Reactant G (kcal/mol)",
-                            "Product G (kcal/mol)",
-                            "CO2 G (kcal/mol)",
-                            "ΔG (kcal/mol)",
+                            f"Reactant G ({energy_unit})",
+                            f"Product G ({energy_unit})",
+                            f"CO2 G ({energy_unit})",
+                            f"ΔG ({energy_unit})",
                             "Favorability",
                         ],
                         "Value": [
@@ -2219,7 +2316,7 @@ def main(data_paths: Optional[List[str]] = None):
                     delta_df,
                     x="deltaG",
                     nbins=30,
-                    labels={"deltaG": "ΔG (kcal/mol)", "count": "Frequency"},
+                    labels={"deltaG": f"ΔG ({energy_unit})", "count": "Frequency"},
                     title="Distribution of Reaction ΔG Values",
                 )
 

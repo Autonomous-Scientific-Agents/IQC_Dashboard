@@ -11,8 +11,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from iqc_dashboard.app import (
     DataManager,
+    ENERGY_UNIT_EV,
+    ENERGY_UNIT_KCAL,
     build_ligand_selector_df,
     calculate_reaction_gibbs,
+    convert_energy_value,
+    energy_metadata_label,
 )
 
 
@@ -302,6 +306,34 @@ class TestDataManager:
         assert result["G_product"].iloc[0] == pytest.approx(expected_product)
         assert result["G_CO2"].iloc[0] == pytest.approx(expected_co2)
         assert result["deltaG"].iloc[0] == pytest.approx(expected_delta)
+
+    def test_calculate_reaction_gibbs_ev_output(self):
+        """Test reaction Gibbs calculation can return eV values."""
+        test_df = pd.DataFrame(
+            {
+                "unique_name": ["bipy-A_C2H2_reactant", "bipy-A_C2H2_product", "CO2"],
+                "G_eV": [0.0, 1.0, -0.5],
+            }
+        )
+
+        result = calculate_reaction_gibbs(test_df, energy_unit=ENERGY_UNIT_EV)
+
+        assert result["G_reactant"].iloc[0] == pytest.approx(0.0)
+        assert result["G_product"].iloc[0] == pytest.approx(1.0)
+        assert result["G_CO2"].iloc[0] == pytest.approx(-0.5)
+        assert result["deltaG"].iloc[0] == pytest.approx(1.5)
+
+    def test_energy_unit_conversion_helpers(self):
+        """Test scalar energy conversion and metadata labels."""
+        assert convert_energy_value(1.0, ENERGY_UNIT_KCAL) == pytest.approx(23.0605)
+        assert convert_energy_value(1.0, ENERGY_UNIT_EV) == pytest.approx(1.0)
+        assert energy_metadata_label("G_eV", ENERGY_UNIT_KCAL) == "G (kcal/mol)"
+        assert energy_metadata_label("S_eV/K", ENERGY_UNIT_KCAL) == "S (kcal/mol/K)"
+
+    def test_invalid_energy_unit_raises(self):
+        """Test invalid energy units fail clearly."""
+        with pytest.raises(ValueError):
+            convert_energy_value(1.0, "hartree")
 
     def test_build_ligand_selector_df_filters_non_reaction_rows(self):
         """Test ligand selector data only keeps rows with parsed bipyridine and ligand values."""
