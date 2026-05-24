@@ -18,6 +18,7 @@ from iqc_dashboard.app import (
     normalize_spectrum_intensities,
     normalize_vibrational_frequencies,
     render_molecule,
+    set_molecule_style,
 )
 
 
@@ -70,12 +71,13 @@ class TestRenderMolecule:
 
                     with patch.dict(sys.modules, {"py3Dmol": mock_py3dmol, "stmol": mock_stmol}):
                         xyz = "3\nH2O\nH 0.0 0.0 0.0\nO 0.0 0.0 0.96\nH 0.87 0.0 0.39"
-                        render_molecule(xyz, style="stick", label="Test")
+                        render_molecule(xyz, style="stick", label="Test", show_labels=True)
 
                     # Verify py3Dmol was called
                     mock_py3dmol.view.assert_called_once_with(width=400, height=400)
                     mock_view.addModel.assert_called_once_with(xyz, "xyz")
                     mock_view.setStyle.assert_called()
+                    assert mock_view.addLabel.call_count == 3
                     mock_view.zoomTo.assert_called_once()
                     mock_view.render.assert_called_once()
                     mock_stmol.showmol.assert_called_once()
@@ -101,6 +103,18 @@ class TestRenderMolecule:
                         render_molecule(xyz, style="sphere")
                         mock_view.setStyle.assert_called_with({"sphere": {"radius": 0.5}})
 
+                        # Test wireframe style
+                        mock_view.reset_mock()
+                        render_molecule(xyz, style="wireframe")
+                        mock_view.setStyle.assert_called_with({"line": {"linewidth": 2}})
+
+                        # Test ball and stick style
+                        mock_view.reset_mock()
+                        render_molecule(xyz, style="ball_and_stick")
+                        mock_view.setStyle.assert_called_with(
+                            {"stick": {"radius": 0.15}, "sphere": {"scale": 0.3}}
+                        )
+
                         # Test cartoon style
                         mock_view.reset_mock()
                         render_molecule(xyz, style="cartoon")
@@ -112,6 +126,14 @@ class TestRenderMolecule:
                         mock_view.setStyle.assert_called_with(
                             {"stick": {}, "sphere": {"radius": 0.3}}
                         )
+
+    def test_set_molecule_style_wireframe(self):
+        """Test wireframe style maps to py3Dmol line rendering."""
+        mock_view = MagicMock()
+
+        set_molecule_style(mock_view, "wireframe")
+
+        mock_view.setStyle.assert_called_once_with({"line": {"linewidth": 2}})
 
     def test_build_geometry_optimization_summary(self):
         """Test geometry optimization summary from initial and optimized XYZ structures."""

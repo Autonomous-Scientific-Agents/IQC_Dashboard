@@ -1321,14 +1321,60 @@ def create_molecule_spectrum_plot(molecule_data, title: str) -> Optional[go.Figu
     )
 
 
-def render_molecule(xyz_string: str, style: str = "stick", label: str = "") -> None:
+def add_atom_labels(view, xyz_string: str) -> None:
+    """Add element-index labels to a py3Dmol view."""
+    parsed_xyz = parse_xyz_coordinates(xyz_string)
+    if parsed_xyz is None:
+        return
+
+    elements, coords = parsed_xyz
+    for atom_index, (element, coord) in enumerate(zip(elements, coords), start=1):
+        view.addLabel(
+            f"{element}{atom_index}",
+            {
+                "position": {
+                    "x": float(coord[0]),
+                    "y": float(coord[1]),
+                    "z": float(coord[2]),
+                },
+                "fontColor": "black",
+                "backgroundColor": "white",
+                "fontSize": 10,
+                "showBackground": True,
+            },
+        )
+
+
+def set_molecule_style(view, style: str) -> None:
+    """Apply a named molecular visualization style to a py3Dmol view."""
+    if style == "stick":
+        view.setStyle({"stick": {}})
+    elif style == "ball_and_stick":
+        view.setStyle({"stick": {"radius": 0.15}, "sphere": {"scale": 0.3}})
+    elif style == "sphere":
+        view.setStyle({"sphere": {"radius": 0.5}})
+    elif style == "wireframe":
+        view.setStyle({"line": {"linewidth": 2}})
+    elif style == "cartoon":
+        view.setStyle({"cartoon": {}})
+    else:
+        view.setStyle({"stick": {}, "sphere": {"radius": 0.3}})
+
+
+def render_molecule(
+    xyz_string: str,
+    style: str = "stick",
+    label: str = "",
+    show_labels: bool = False,
+) -> None:
     """
     Render a molecule in 3D using stmol.
 
     Args:
         xyz_string: XYZ format string of the molecule
-        style: Visualization style ('stick', 'sphere', 'cartoon', etc.)
+        style: Visualization style ('stick', 'ball_and_stick', 'sphere', 'wireframe', etc.)
         label: Optional label to display
+        show_labels: Whether to display atom labels
     """
     # Check if required libraries are available
     if not STMOL_AVAILABLE:
@@ -1358,15 +1404,9 @@ def render_molecule(xyz_string: str, style: str = "stick", label: str = "") -> N
         view = py3Dmol.view(width=400, height=400)
         view.addModel(xyz_string, "xyz")
 
-        # Set visualization style
-        if style == "stick":
-            view.setStyle({"stick": {}})
-        elif style == "sphere":
-            view.setStyle({"sphere": {"radius": 0.5}})
-        elif style == "cartoon":
-            view.setStyle({"cartoon": {}})
-        else:
-            view.setStyle({"stick": {}, "sphere": {"radius": 0.3}})
+        set_molecule_style(view, style)
+        if show_labels:
+            add_atom_labels(view, xyz_string)
 
         view.zoomTo()
         view.render()
@@ -1941,17 +1981,48 @@ def main(data_paths: Optional[List[str]] = None):
                 # 3D Visualization
                 st.subheader("3D Molecular Structures")
 
+                view_style_options = {
+                    "Stick": "stick",
+                    "Ball and stick": "ball_and_stick",
+                    "Sphere": "sphere",
+                    "Wireframe": "wireframe",
+                }
+                col_view_style, col_view_labels = st.columns([2, 1])
+                with col_view_style:
+                    selected_view_style = st.selectbox(
+                        "3D style",
+                        options=list(view_style_options.keys()),
+                        key="molecule_view_style",
+                    )
+                with col_view_labels:
+                    show_atom_labels = st.checkbox(
+                        "Atom labels",
+                        value=False,
+                        key="molecule_view_labels",
+                    )
+                molecule_view_style = view_style_options[selected_view_style]
+
                 col_left, col_right = st.columns(2)
 
                 with col_left:
                     st.markdown("### Initial Structure")
                     initial_xyz = molecule_data.get("initial_xyz", None)
-                    render_molecule(initial_xyz, style="stick", label="Initial")
+                    render_molecule(
+                        initial_xyz,
+                        style=molecule_view_style,
+                        label="Initial",
+                        show_labels=show_atom_labels,
+                    )
 
                 with col_right:
                     st.markdown("### Optimized Structure")
                     opt_xyz = molecule_data.get("opt_xyz", None)
-                    render_molecule(opt_xyz, style="stick", label="Optimized")
+                    render_molecule(
+                        opt_xyz,
+                        style=molecule_view_style,
+                        label="Optimized",
+                        show_labels=show_atom_labels,
+                    )
 
                 st.markdown("---")
 
