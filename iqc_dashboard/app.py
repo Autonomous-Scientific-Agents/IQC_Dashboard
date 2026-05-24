@@ -21,6 +21,19 @@ EV_TO_KCAL_MOL = 23.0605
 ENERGY_UNIT_KCAL = "kcal/mol"
 ENERGY_UNIT_EV = "eV"
 ENERGY_UNITS = [ENERGY_UNIT_KCAL, ENERGY_UNIT_EV]
+COVALENT_RADII_ANGSTROM = {
+    "H": 0.31,
+    "B": 0.85,
+    "C": 0.76,
+    "N": 0.71,
+    "O": 0.66,
+    "F": 0.57,
+    "P": 1.07,
+    "S": 1.05,
+    "Cl": 1.02,
+    "Br": 1.20,
+    "I": 1.39,
+}
 
 # Import 3D visualization libraries - will be checked when needed
 STMOL_AVAILABLE = False
@@ -760,6 +773,313 @@ def build_all_data_table(molecule_data: pd.Series, energy_unit: str) -> pd.DataF
         )
 
     return pd.DataFrame(rows, columns=["Field", "Value"])
+
+
+def normalize_element_symbol(raw_symbol: str) -> Optional[str]:
+    """Normalize an XYZ atom symbol for display and radius lookup."""
+    match = re.match(r"([A-Za-z]+)", str(raw_symbol).strip())
+    if not match:
+        return None
+    symbol = match.group(1)
+    return symbol[:1].upper() + symbol[1:].lower()
+
+
+def parse_xyz_coordinates(xyz_string: str) -> Optional[Tuple[List[str], np.ndarray]]:
+    """Parse XYZ text into element symbols and coordinates."""
+    if not xyz_string or is_missing_scalar(xyz_string):
+        return None
+
+    lines = [line.strip() for line in str(xyz_string).splitlines() if line.strip()]
+    if not lines:
+        return None
+
+    atom_lines = lines
+    try:
+        atom_count = int(lines[0])
+        atom_lines = lines[2 : 2 + atom_count]
+    except (ValueError, IndexError):
+        pass
+
+    elements = []
+    coordinates = []
+    for line in atom_lines:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+
+        element = normalize_element_symbol(parts[0])
+        if element is None:
+            continue
+
+        try:
+            coordinate = [float(parts[1]), float(parts[2]), float(parts[3])]
+        except ValueError:
+            continue
+
+        elements.append(element)
+        coordinates.append(coordinate)
+
+    if not elements:
+        return None
+
+    return elements, np.array(coordinates, dtype=float)
+
+
+def atom_label(elements: List[str], atom_index: int) -> str:
+    """Return a compact atom label using element plus one-based atom index."""
+    return f"{elements[atom_index]}{atom_index + 1}"
+
+
+def align_coordinates(
+    reference_coords: np.ndarray,
+    mobile_coords: np.ndarray,
+    fit_indices: List[int],
+) -> np.ndarray:
+    """Align mobile coordinates onto reference coordinates using Kabsch fitting."""
+    if len(fit_indices) == 0:
+        fit_indices = list(range(len(reference_coords)))
+
+    reference_fit = reference_coords[fit_indices]
+    mobile_fit = mobile_coords[fit_indices]
+    reference_centroid = reference_fit.mean(axis=0)
+    mobile_centroid = mobile_fit.mean(axis=0)
+
+    if len(fit_indices) < 2:
+        return mobile_coords - mobile_centroid + reference_centroid
+
+    reference_centered = reference_fit - reference_centroid
+    mobile_centered = mobile_fit - mobile_centroid
+    covariance = mobile_centered.T @ reference_centered
+    left, _, right_t = np.linalg.svd(covariance)
+    rotation = right_t.T @ left.T
+
+    if np.linalg.det(rotation) < 0:
+        right_t[-1, :] *= -1
+        rotation = right_t.T @ left.T
+
+    return (mobile_coords - mobile_centroid) @ rotation + reference_centroid
+
+
+def calculate_distance(coords: np.ndarray, atom_i: int, atom_j: int) -> float:
+    """Calculate an interatomic distance."""
+    return float(np.linalg.norm(coords[atom_i] - coords[atom_j]))
+
+
+def calculate_angle(coords: np.ndarray, atom_i: int, atom_j: int, atom_k: int) -> float:
+    """Calculate an angle in degrees for i-j-k."""
+    vec_a = coords[atom_i] - coords[atom_j]
+    vec_b = coords[atom_k] - coords[atom_j]
+    norm_product = np.linalg.norm(vec_a) * np.linalg.norm(vec_b)
+    if norm_product == 0:
+        return float("nan")
+
+    cosine = np.clip(np.dot(vec_a, vec_b) / norm_product, -1.0, 1.0)
+    return float(np.degrees(np.arccos(cosine)))
+
+
+def calculate_dihedral(
+    coords: np.ndarray,
+    atom_i: int,
+    atom_j: int,
+    atom_k: int,
+    atom_l: int,
+) -> float:
+    """Calculate a signed dihedral angle in degrees for i-j-k-l."""
+    p0 = coords[atom_i]
+    p1 = coords[atom_j]
+    p2 = coords[atom_k]
+    p3 = coords[atom_l]
+
+    b0 = -(p1 - p0)
+    b1 = p2 - p1
+    b2 = p3 - p2
+    b1_norm = np.linalg.norm(b1)
+    if b1_norm == 0:
+        return float("nan")
+
+    b1 = b1 / b1_norm
+    v = b0 - np.dot(b0, b1) * b1
+    w = b2 - np.dot(b2, b1) * b1
+    v_norm = np.linalg.norm(v)
+    w_norm = np.linalg.norm(w)
+    if v_norm == 0 or w_norm == 0:
+        return float("nan")
+
+    x = np.dot(v, w)
+    y = np.dot(np.cross(b1, v), w)
+    return float(np.degrees(np.arctan2(y, x)))
+
+
+def normalize_angle_delta(delta: float) -> float:
+    """Normalize an angle delta to the [-180, 180] interval."""
+    return float(((delta + 180.0) % 360.0) - 180.0)
+
+
+def infer_bonds(elements: List[str], coords: np.ndarray) -> set[Tuple[int, int]]:
+    """Infer covalent bonds from interatomic distances and covalent radii."""
+    bonds = set()
+    for atom_i in range(len(elements)):
+        radius_i = COVALENT_RADII_ANGSTROM.get(elements[atom_i], 0.77)
+        for atom_j in range(atom_i + 1, len(elements)):
+            radius_j = COVALENT_RADII_ANGSTROM.get(elements[atom_j], 0.77)
+            distance = calculate_distance(coords, atom_i, atom_j)
+            if 0.35 <= distance <= 1.25 * (radius_i + radius_j):
+                bonds.add((atom_i, atom_j))
+    return bonds
+
+
+def build_bond_adjacency(bonds: set[Tuple[int, int]], atom_count: int) -> List[set[int]]:
+    """Build adjacency sets from inferred bonds."""
+    adjacency = [set() for _ in range(atom_count)]
+    for atom_i, atom_j in bonds:
+        adjacency[atom_i].add(atom_j)
+        adjacency[atom_j].add(atom_i)
+    return adjacency
+
+
+def find_angle_tuples(adjacency: List[set[int]]) -> List[Tuple[int, int, int]]:
+    """Find unique bonded angle tuples i-j-k."""
+    angles = []
+    for center_atom, neighbors in enumerate(adjacency):
+        sorted_neighbors = sorted(neighbors)
+        for left_index, atom_i in enumerate(sorted_neighbors):
+            for atom_k in sorted_neighbors[left_index + 1 :]:
+                angles.append((atom_i, center_atom, atom_k))
+    return angles
+
+
+def find_dihedral_tuples(
+    bonds: set[Tuple[int, int]],
+    adjacency: List[set[int]],
+) -> List[Tuple[int, int, int, int]]:
+    """Find unique bonded dihedral tuples i-j-k-l."""
+    dihedrals = []
+    seen = set()
+    for atom_j, atom_k in sorted(bonds):
+        for atom_i in sorted(adjacency[atom_j] - {atom_k}):
+            for atom_l in sorted(adjacency[atom_k] - {atom_j}):
+                if atom_i == atom_l:
+                    continue
+                forward = (atom_i, atom_j, atom_k, atom_l)
+                reverse = (atom_l, atom_k, atom_j, atom_i)
+                canonical = min(forward, reverse)
+                if canonical in seen:
+                    continue
+                seen.add(canonical)
+                dihedrals.append(forward)
+    return dihedrals
+
+
+def rank_geometry_changes(rows: List[dict], delta_column: str, limit: int) -> pd.DataFrame:
+    """Sort geometry changes by absolute delta and return the top rows."""
+    if not rows:
+        return pd.DataFrame()
+
+    ranked = pd.DataFrame(rows)
+    ranked["_abs_delta"] = ranked[delta_column].abs()
+    ranked = ranked.sort_values("_abs_delta", ascending=False).drop(columns=["_abs_delta"])
+    return ranked.head(limit).reset_index(drop=True)
+
+
+def build_geometry_optimization_summary(
+    molecule_data: pd.Series,
+    energy_unit: str,
+    limit: int = 5,
+) -> Optional[dict]:
+    """Build geometry optimization summary data from initial and optimized XYZ structures."""
+    initial_parsed = parse_xyz_coordinates(molecule_data.get("initial_xyz", None))
+    optimized_parsed = parse_xyz_coordinates(molecule_data.get("opt_xyz", None))
+    if initial_parsed is None or optimized_parsed is None:
+        return None
+
+    elements_initial, initial_coords = initial_parsed
+    elements_optimized, optimized_coords = optimized_parsed
+    if elements_initial != elements_optimized or len(initial_coords) != len(optimized_coords):
+        return None
+
+    heavy_indices = [
+        index for index, element in enumerate(elements_initial) if element.upper() != "H"
+    ]
+    fit_indices = heavy_indices or list(range(len(elements_initial)))
+    aligned_optimized_coords = align_coordinates(initial_coords, optimized_coords, fit_indices)
+    displacements = np.linalg.norm(aligned_optimized_coords - initial_coords, axis=1)
+    heavy_rmsd = float(np.sqrt(np.mean(displacements[fit_indices] ** 2)))
+    max_displacement = float(np.max(displacements)) if len(displacements) else 0.0
+
+    initial_bonds = infer_bonds(elements_initial, initial_coords)
+    optimized_bonds = infer_bonds(elements_initial, optimized_coords)
+    bonds = initial_bonds | optimized_bonds
+    adjacency = build_bond_adjacency(bonds, len(elements_initial))
+
+    bond_rows = []
+    for atom_i, atom_j in sorted(bonds):
+        initial_distance = calculate_distance(initial_coords, atom_i, atom_j)
+        optimized_distance = calculate_distance(optimized_coords, atom_i, atom_j)
+        bond_rows.append(
+            {
+                "Bond": f"{atom_label(elements_initial, atom_i)}-{atom_label(elements_initial, atom_j)}",
+                "Initial (Å)": initial_distance,
+                "Optimized (Å)": optimized_distance,
+                "Δ (Å)": optimized_distance - initial_distance,
+            }
+        )
+
+    angle_rows = []
+    for atom_i, atom_j, atom_k in find_angle_tuples(adjacency):
+        initial_angle = calculate_angle(initial_coords, atom_i, atom_j, atom_k)
+        optimized_angle = calculate_angle(optimized_coords, atom_i, atom_j, atom_k)
+        if not np.isfinite(initial_angle) or not np.isfinite(optimized_angle):
+            continue
+        angle_rows.append(
+            {
+                "Angle": (
+                    f"{atom_label(elements_initial, atom_i)}-"
+                    f"{atom_label(elements_initial, atom_j)}-"
+                    f"{atom_label(elements_initial, atom_k)}"
+                ),
+                "Initial (°)": initial_angle,
+                "Optimized (°)": optimized_angle,
+                "Δ (°)": optimized_angle - initial_angle,
+            }
+        )
+
+    dihedral_rows = []
+    for atom_i, atom_j, atom_k, atom_l in find_dihedral_tuples(bonds, adjacency):
+        initial_dihedral = calculate_dihedral(initial_coords, atom_i, atom_j, atom_k, atom_l)
+        optimized_dihedral = calculate_dihedral(optimized_coords, atom_i, atom_j, atom_k, atom_l)
+        if not np.isfinite(initial_dihedral) or not np.isfinite(optimized_dihedral):
+            continue
+        dihedral_rows.append(
+            {
+                "Dihedral": (
+                    f"{atom_label(elements_initial, atom_i)}-"
+                    f"{atom_label(elements_initial, atom_j)}-"
+                    f"{atom_label(elements_initial, atom_k)}-"
+                    f"{atom_label(elements_initial, atom_l)}"
+                ),
+                "Initial (°)": initial_dihedral,
+                "Optimized (°)": optimized_dihedral,
+                "Δ (°)": normalize_angle_delta(optimized_dihedral - initial_dihedral),
+            }
+        )
+
+    initial_energy = molecule_data.get("initial_energy_eV", None)
+    optimized_energy = molecule_data.get("opt_energy_eV", None)
+    energy_change = None
+    if not is_missing_scalar(initial_energy) and not is_missing_scalar(optimized_energy):
+        energy_change = convert_energy_value(
+            float(optimized_energy) - float(initial_energy),
+            energy_unit,
+        )
+
+    return {
+        "energy_change": energy_change,
+        "heavy_atom_rmsd": heavy_rmsd,
+        "max_atom_displacement": max_displacement,
+        "bond_changes": rank_geometry_changes(bond_rows, "Δ (Å)", limit),
+        "angle_changes": rank_geometry_changes(angle_rows, "Δ (°)", limit),
+        "dihedral_changes": rank_geometry_changes(dihedral_rows, "Δ (°)", limit),
+    }
 
 
 def create_ir_spectrum_plot(
@@ -1632,6 +1952,55 @@ def main(data_paths: Optional[List[str]] = None):
                     st.markdown("### Optimized Structure")
                     opt_xyz = molecule_data.get("opt_xyz", None)
                     render_molecule(opt_xyz, style="stick", label="Optimized")
+
+                st.markdown("---")
+
+                st.subheader("Geometry Optimization Summary")
+                geometry_summary = build_geometry_optimization_summary(
+                    molecule_data,
+                    energy_unit,
+                )
+                if geometry_summary is None:
+                    st.info(
+                        "Geometry optimization summary requires matching initial_xyz "
+                        "and opt_xyz atom lists."
+                    )
+                else:
+                    col_geom1, col_geom2, col_geom3 = st.columns(3)
+                    with col_geom1:
+                        energy_change = geometry_summary["energy_change"]
+                        energy_change_text = (
+                            f"{energy_change:.4f} {energy_unit}"
+                            if energy_change is not None
+                            else "N/A"
+                        )
+                        st.metric("Energy Change", energy_change_text)
+                    with col_geom2:
+                        st.metric(
+                            "Heavy-atom RMSD",
+                            f"{geometry_summary['heavy_atom_rmsd']:.3f} Å",
+                        )
+                    with col_geom3:
+                        st.metric(
+                            "Max Atom Displacement",
+                            f"{geometry_summary['max_atom_displacement']:.3f} Å",
+                        )
+
+                    for label, table_key in [
+                        ("Largest Bond Changes", "bond_changes"),
+                        ("Largest Angle Changes", "angle_changes"),
+                        ("Largest Dihedral Changes", "dihedral_changes"),
+                    ]:
+                        st.markdown(f"**{label}**")
+                        change_df = geometry_summary[table_key]
+                        if change_df.empty:
+                            st.info("No bonded geometry changes available.")
+                        else:
+                            st.dataframe(
+                                change_df,
+                                use_container_width=True,
+                                hide_index=True,
+                            )
 
                 st.markdown("---")
 

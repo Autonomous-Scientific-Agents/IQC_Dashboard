@@ -3,11 +3,14 @@
 from unittest.mock import patch, MagicMock
 import sys
 from pathlib import Path
+import pytest
 
 # Add parent directory to path to import the module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from iqc_dashboard.app import (
+    ENERGY_UNIT_EV,
+    build_geometry_optimization_summary,
     build_vibrational_frequency_table,
     create_ir_spectrum_plot,
     create_molecule_spectrum_plot,
@@ -109,6 +112,48 @@ class TestRenderMolecule:
                         mock_view.setStyle.assert_called_with(
                             {"stick": {}, "sphere": {"radius": 0.3}}
                         )
+
+    def test_build_geometry_optimization_summary(self):
+        """Test geometry optimization summary from initial and optimized XYZ structures."""
+        molecule_data = {
+            "initial_xyz": (
+                "4\ninitial\n"
+                "C 0.0 0.0 0.0\n"
+                "C 1.5 0.0 0.0\n"
+                "C 2.5 1.0 0.0\n"
+                "C 3.5 1.0 1.0"
+            ),
+            "opt_xyz": (
+                "4\noptimized\n"
+                "C 0.0 0.0 0.0\n"
+                "C 1.4 0.0 0.0\n"
+                "C 2.5 1.0 0.0\n"
+                "C 3.4 1.2 -1.0"
+            ),
+            "initial_energy_eV": -10.0,
+            "opt_energy_eV": -10.2,
+        }
+
+        summary = build_geometry_optimization_summary(molecule_data, ENERGY_UNIT_EV)
+
+        assert summary is not None
+        assert summary["energy_change"] == pytest.approx(-0.2)
+        assert summary["heavy_atom_rmsd"] > 0
+        assert summary["max_atom_displacement"] > 0
+        assert not summary["bond_changes"].empty
+        assert not summary["angle_changes"].empty
+        assert not summary["dihedral_changes"].empty
+
+    def test_build_geometry_optimization_summary_requires_matching_atoms(self):
+        """Test geometry summary returns None when atom lists do not match."""
+        molecule_data = {
+            "initial_xyz": "2\ninitial\nH 0.0 0.0 0.0\nH 0.0 0.0 0.7",
+            "opt_xyz": "2\noptimized\nH 0.0 0.0 0.0\nO 0.0 0.0 0.7",
+        }
+
+        summary = build_geometry_optimization_summary(molecule_data, ENERGY_UNIT_EV)
+
+        assert summary is None
 
     def test_normalize_vibrational_frequencies(self):
         """Test vibrational frequency normalization handles iterable numeric input."""
