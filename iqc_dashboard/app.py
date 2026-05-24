@@ -504,6 +504,348 @@ def highlight_string_differences(str1: str, str2: str) -> Tuple[str, str]:
     return "".join(highlighted1_parts), "".join(highlighted2_parts)
 
 
+def normalize_vibrational_frequencies(frequencies) -> Optional[np.ndarray]:
+    """
+    Normalize vibrational frequencies into a numeric 1D numpy array.
+
+    Args:
+        frequencies: Frequency collection from the dataset.
+
+    Returns:
+        A 1D numpy array of finite float values, or None if the input cannot be parsed.
+    """
+    if frequencies is None:
+        return None
+    if isinstance(frequencies, float) and pd.isna(frequencies):
+        return None
+
+    if isinstance(frequencies, np.ndarray):
+        freq_array = frequencies
+    elif isinstance(frequencies, list):
+        freq_array = np.array(frequencies)
+    elif hasattr(frequencies, "__iter__") and not isinstance(frequencies, (str, bytes)):
+        freq_array = np.array(list(frequencies))
+    else:
+        return None
+
+    try:
+        freq_array = np.asarray(freq_array, dtype=float).reshape(-1)
+    except (TypeError, ValueError):
+        return None
+
+    freq_array = freq_array[np.isfinite(freq_array)]
+    if len(freq_array) == 0:
+        return None
+
+    return freq_array
+
+
+def normalize_spectrum_intensities(intensities, expected_length: int) -> Optional[np.ndarray]:
+    """
+    Normalize spectrum intensities into a numeric 1D numpy array.
+
+    Args:
+        intensities: Intensity collection from the dataset.
+        expected_length: Required number of intensity values.
+
+    Returns:
+        A 1D numpy array of finite float values, or None if unavailable or mismatched.
+    """
+    if intensities is None:
+        return None
+    if isinstance(intensities, float) and pd.isna(intensities):
+        return None
+
+    if isinstance(intensities, np.ndarray):
+        intensity_array = intensities
+    elif isinstance(intensities, list):
+        intensity_array = np.array(intensities)
+    elif hasattr(intensities, "__iter__") and not isinstance(intensities, (str, bytes)):
+        intensity_array = np.array(list(intensities))
+    else:
+        return None
+
+    try:
+        intensity_array = np.asarray(intensity_array, dtype=float).reshape(-1)
+    except (TypeError, ValueError):
+        return None
+
+    if len(intensity_array) != expected_length or not np.all(np.isfinite(intensity_array)):
+        return None
+
+    return intensity_array
+
+
+def _clean_unit(unit) -> Optional[str]:
+    """Return a displayable unit string, or None when unavailable."""
+    if unit is None:
+        return None
+    try:
+        if pd.isna(unit):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    unit_text = str(unit).strip()
+    if not unit_text:
+        return None
+    return unit_text
+
+
+def _get_first_present(mapping, keys: Tuple[str, ...]):
+    """Return the first non-null value from a dict-like object."""
+    for key in keys:
+        value = mapping.get(key, None)
+        if value is None:
+            continue
+        try:
+            if pd.isna(value):
+                continue
+        except (TypeError, ValueError):
+            pass
+        return value
+    return None
+
+
+def create_ir_spectrum_plot(
+    frequencies,
+    intensities,
+    title: str,
+    frequency_units=None,
+    intensity_units=None,
+) -> Optional[go.Figure]:
+    """
+    Create an IR spectrum curve from paired spectrum frequency and intensity arrays.
+
+    Args:
+        frequencies: Spectrum frequency collection from the dataset.
+        intensities: Spectrum intensity collection from the dataset.
+        title: Plot title.
+        frequency_units: Optional frequency unit label.
+        intensity_units: Optional intensity unit label.
+
+    Returns:
+        Plotly figure, or None if paired spectrum data is unavailable.
+    """
+    freq_array = normalize_vibrational_frequencies(frequencies)
+    if freq_array is None:
+        return None
+
+    intensity_array = normalize_spectrum_intensities(intensities, len(freq_array))
+    if intensity_array is None:
+        return None
+
+    frequency_unit = _clean_unit(frequency_units) or "cm^-1"
+    intensity_unit = _clean_unit(intensity_units)
+    intensity_label = "IR Intensity"
+    if intensity_unit:
+        intensity_label = f"{intensity_label} ({intensity_unit})"
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=freq_array,
+            y=intensity_array,
+            mode="lines",
+            line=dict(color="#1f77b4", width=2),
+            name="IR Spectrum",
+            hovertemplate=(
+                f"Frequency: %{{x:.2f}} {frequency_unit}<br>"
+                "Intensity: %{y:.4g}<extra></extra>"
+            ),
+        )
+    )
+    fig.update_layout(
+        title=title,
+        xaxis_title=f"Frequency ({frequency_unit})",
+        yaxis_title=intensity_label,
+        height=420,
+    )
+
+    return fig
+
+
+def build_vibrational_frequency_table(frequencies, intensities=None) -> pd.DataFrame:
+    """
+    Build a table of vibrational modes for display.
+
+    Args:
+        frequencies: Frequency collection from the dataset.
+        intensities: Optional spectrum intensity collection.
+
+    Returns:
+        DataFrame with mode number, frequency, and mode type.
+    """
+    freq_array = normalize_vibrational_frequencies(frequencies)
+    columns = ["Mode", "Frequency (cm^-1)", "Type"]
+    if freq_array is None:
+        return pd.DataFrame(columns=columns)
+
+    table = pd.DataFrame(
+        {
+            "Mode": np.arange(1, len(freq_array) + 1),
+            "Frequency (cm^-1)": freq_array,
+            "Type": np.where(freq_array < 0, "Imaginary", "Real"),
+        }
+    )
+
+    intensity_array = normalize_spectrum_intensities(intensities, len(freq_array))
+    if intensity_array is not None:
+        table["Intensity"] = intensity_array
+
+    return table
+
+
+def create_vibrational_stick_plot(
+    frequencies,
+    title: str,
+    intensities=None,
+    frequency_units=None,
+    intensity_units=None,
+) -> Optional[go.Figure]:
+    """
+    Create a stick plot for vibrational frequencies.
+
+    Args:
+        frequencies: Frequency collection from the dataset.
+        title: Plot title.
+        intensities: Optional spectrum intensity collection.
+        frequency_units: Optional frequency unit label.
+        intensity_units: Optional intensity unit label.
+
+    Returns:
+        Plotly figure, or None if no valid frequencies are available.
+    """
+    freq_array = normalize_vibrational_frequencies(frequencies)
+    if freq_array is None:
+        return None
+
+    intensity_array = normalize_spectrum_intensities(intensities, len(freq_array))
+    uses_intensities = intensity_array is not None
+    plot_heights = intensity_array if uses_intensities else np.ones(len(freq_array))
+    frequency_unit = _clean_unit(frequency_units) or "cm^-1"
+    intensity_unit = _clean_unit(intensity_units)
+
+    def _segment_trace(
+        values: np.ndarray,
+        heights: np.ndarray,
+        name: str,
+        color: str,
+    ) -> Optional[go.Scatter]:
+        if len(values) == 0:
+            return None
+
+        x_coords = []
+        y_coords = []
+        for value, height in zip(values, heights):
+            x_coords.extend([value, value, None])
+            y_coords.extend([0, height, None])
+
+        return go.Scatter(
+            x=x_coords,
+            y=y_coords,
+            mode="lines",
+            line=dict(color=color, width=2),
+            name=name,
+            hoverinfo="skip",
+        )
+
+    fig = go.Figure()
+
+    imaginary_mask = freq_array < 0
+    imag_trace = _segment_trace(
+        freq_array[imaginary_mask],
+        plot_heights[imaginary_mask],
+        "Imaginary Modes",
+        "#d62728",
+    )
+    real_trace = _segment_trace(
+        freq_array[~imaginary_mask],
+        plot_heights[~imaginary_mask],
+        "Real Modes",
+        "#1f77b4",
+    )
+
+    for trace in (imag_trace, real_trace):
+        if trace is not None:
+            fig.add_trace(trace)
+
+    mode_types = np.where(imaginary_mask, "Imaginary", "Real")
+    customdata = [
+        [mode_type, intensity]
+        for mode_type, intensity in zip(mode_types, plot_heights)
+    ]
+    yaxis_title = "Relative Intensity"
+    if uses_intensities:
+        yaxis_title = "IR Intensity"
+        if intensity_unit:
+            yaxis_title = f"{yaxis_title} ({intensity_unit})"
+
+    fig.add_trace(
+        go.Scatter(
+            x=freq_array,
+            y=plot_heights,
+            mode="markers",
+            marker=dict(
+                size=8,
+                color=np.where(imaginary_mask, "#d62728", "#1f77b4"),
+            ),
+            customdata=customdata,
+            name="Modes",
+            hovertemplate=(
+                f"Frequency: %{{x:.2f}} {frequency_unit}<br>"
+                "Intensity: %{customdata[1]:.4g}<br>"
+                "Type: %{customdata[0]}<extra></extra>"
+            ),
+            showlegend=False,
+        )
+    )
+
+    y_max = float(np.max(plot_heights)) if len(plot_heights) else 1.0
+    if y_max <= 0:
+        y_max = 1.0
+
+    fig.update_layout(
+        title=title,
+        xaxis_title=f"Frequency ({frequency_unit})",
+        yaxis_title=yaxis_title,
+        yaxis=dict(range=[0, y_max * 1.1], showticklabels=uses_intensities),
+        height=420,
+    )
+
+    return fig
+
+
+def create_molecule_spectrum_plot(molecule_data, title: str) -> Optional[go.Figure]:
+    """
+    Create the best available IR spectrum plot for a molecule row.
+
+    Uses paired spectrum_frequencies/spectrum_intensities first, then falls back to
+    vibrational mode frequencies when only mode-level data is present.
+    """
+    spectrum_fig = create_ir_spectrum_plot(
+        molecule_data.get("spectrum_frequencies", None),
+        molecule_data.get("spectrum_intensities", None),
+        title,
+        molecule_data.get("spectrum_frequencies_units", None),
+        molecule_data.get("spectrum_intensities_units", None),
+    )
+    if spectrum_fig is not None:
+        return spectrum_fig
+
+    frequencies = _get_first_present(
+        molecule_data,
+        ("vibrational_frequencies_cm^-1", "frequencies_cm^-1"),
+    )
+    return create_vibrational_stick_plot(
+        frequencies,
+        title,
+        molecule_data.get("spectrum_intensities", None),
+        "cm^-1",
+        molecule_data.get("spectrum_intensities_units", None),
+    )
+
+
 def render_molecule(xyz_string: str, style: str = "stick", label: str = "") -> None:
     """
     Render a molecule in 3D using stmol.
@@ -668,6 +1010,32 @@ def calculate_reaction_gibbs(df: pd.DataFrame) -> pd.DataFrame:
     delta["deltaG"] = delta["G_product"] - (delta["G_reactant"] + delta["G_CO2"])
 
     return delta
+
+
+def build_ligand_selector_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build a selector dataframe for reaction-like entries with parsed ligand metadata.
+
+    Parameters:
+        df (pd.DataFrame): DataFrame containing a unique_name column.
+
+    Returns:
+        pd.DataFrame: DataFrame with unique_name, bipyridine, alkyne, and role columns.
+            Rows without parsed bipyridine or alkyne values are excluded.
+    """
+    if df.empty or "unique_name" not in df.columns:
+        return pd.DataFrame(columns=["unique_name", "bipyridine", "alkyne", "role"])
+
+    selector_df = df[["unique_name"]].dropna().drop_duplicates().reset_index(drop=True)
+    parsed = selector_df["unique_name"].apply(parse_unique_name)
+    parsed_df = pd.DataFrame(parsed.tolist())
+
+    selector_df = pd.concat([selector_df, parsed_df], axis=1)
+    selector_df = selector_df.dropna(
+        subset=["bipyridine", "alkyne", "role"]
+    ).reset_index(drop=True)
+
+    return selector_df
 
 
 # ============================================================================
@@ -921,8 +1289,77 @@ def main(data_paths: Optional[List[str]] = None):
     # Tab 1: Single Calculation
     # ========================================================================
     with tab1:
-        if selected_molecule:
-            molecule_data = data_manager.get_molecule_by_name(selected_molecule)
+        displayed_molecule = selected_molecule
+        single_calc_molecule_names = molecule_names if "molecule_names" in locals() else []
+        use_ligand_selector_navigation = False
+
+        ligand_selector_df = build_ligand_selector_df(filtered_df)
+
+        if not ligand_selector_df.empty:
+            st.subheader("Select by Ligands")
+
+            default_selection = parse_unique_name(selected_molecule) if selected_molecule else {}
+            available_bipyridines = sorted(ligand_selector_df["bipyridine"].unique())
+
+            default_bipy = default_selection.get("bipyridine")
+            if st.session_state.get("single_calc_bipy_select") not in available_bipyridines:
+                st.session_state["single_calc_bipy_select"] = (
+                    default_bipy if default_bipy in available_bipyridines else available_bipyridines[0]
+                )
+
+            col_sel1, col_sel2 = st.columns(2)
+            with col_sel1:
+                selected_bipy = st.selectbox(
+                    "Select Bipyridine Ligand",
+                    options=available_bipyridines,
+                    key="single_calc_bipy_select",
+                )
+
+            available_alkynes = sorted(
+                ligand_selector_df[ligand_selector_df["bipyridine"] == selected_bipy]["alkyne"].unique()
+            )
+            default_alkyne = default_selection.get("alkyne")
+            if st.session_state.get("single_calc_alkyl_select") not in available_alkynes:
+                st.session_state["single_calc_alkyl_select"] = (
+                    default_alkyne if default_alkyne in available_alkynes else available_alkynes[0]
+                )
+
+            with col_sel2:
+                selected_alkyne = st.selectbox(
+                    "Select Alkyl Ligand",
+                    options=available_alkynes,
+                    key="single_calc_alkyl_select",
+                )
+
+            matching_df = ligand_selector_df[
+                (ligand_selector_df["bipyridine"] == selected_bipy)
+                & (ligand_selector_df["alkyne"] == selected_alkyne)
+            ].sort_values("unique_name")
+            single_calc_molecule_names = matching_df["unique_name"].tolist()
+
+            if single_calc_molecule_names:
+                if (
+                    st.session_state.get("single_calc_molecule_select")
+                    not in single_calc_molecule_names
+                ):
+                    st.session_state["single_calc_molecule_select"] = (
+                        selected_molecule
+                        if selected_molecule in single_calc_molecule_names
+                        else single_calc_molecule_names[0]
+                    )
+
+                displayed_molecule = st.selectbox(
+                    "Select Calculation",
+                    options=single_calc_molecule_names,
+                    key="single_calc_molecule_select",
+                    help="Choose the exact calculation for the selected ligand pair.",
+                )
+                use_ligand_selector_navigation = True
+
+            st.markdown("---")
+
+        if displayed_molecule:
+            molecule_data = data_manager.get_molecule_by_name(displayed_molecule)
 
             if molecule_data is not None:
                 # Header with key information
@@ -1032,20 +1469,78 @@ def main(data_paths: Optional[List[str]] = None):
                     opt_xyz = molecule_data.get("opt_xyz", None)
                     render_molecule(opt_xyz, style="stick", label="Optimized")
 
+                st.markdown("---")
+
+                # IR spectrum and vibrational frequency analysis for the selected calculation
+                st.subheader("IR Spectrum")
+
+                frequencies = _get_first_present(
+                    molecule_data,
+                    ("vibrational_frequencies_cm^-1", "frequencies_cm^-1"),
+                )
+                intensities = molecule_data.get("spectrum_intensities", None)
+                freq_table = build_vibrational_frequency_table(frequencies, intensities)
+                fig_vib = create_molecule_spectrum_plot(
+                    molecule_data,
+                    f"IR Spectrum for {displayed_molecule}",
+                )
+
+                if fig_vib is not None or not freq_table.empty:
+                    col_vib1, col_vib2 = st.columns([3, 2])
+
+                    with col_vib1:
+                        if fig_vib is not None:
+                            st.plotly_chart(fig_vib, use_container_width=True)
+                        else:
+                            st.info("No IR spectrum data available for this calculation.")
+
+                    with col_vib2:
+                        if not freq_table.empty:
+                            st.dataframe(
+                                freq_table,
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                        else:
+                            st.info("No vibrational mode table available for this calculation.")
+                else:
+                    st.info("No IR spectrum or vibrational frequency data available for this calculation.")
+
                 # Navigation controls
-                if molecule_names:
-                    current_index = st.session_state["selected_molecule_index"]
+                if single_calc_molecule_names:
+                    if use_ligand_selector_navigation:
+                        current_index = single_calc_molecule_names.index(displayed_molecule)
 
-                    def _go_prev():
-                        if st.session_state["selected_molecule_index"] > 0:
-                            st.session_state["selected_molecule_index"] -= 1
+                        def _go_prev():
+                            current_idx = single_calc_molecule_names.index(
+                                st.session_state["single_calc_molecule_select"]
+                            )
+                            if current_idx > 0:
+                                st.session_state["single_calc_molecule_select"] = (
+                                    single_calc_molecule_names[current_idx - 1]
+                                )
 
-                    def _go_next():
-                        if (
-                            st.session_state["selected_molecule_index"]
-                            < len(molecule_names) - 1
-                        ):
-                            st.session_state["selected_molecule_index"] += 1
+                        def _go_next():
+                            current_idx = single_calc_molecule_names.index(
+                                st.session_state["single_calc_molecule_select"]
+                            )
+                            if current_idx < len(single_calc_molecule_names) - 1:
+                                st.session_state["single_calc_molecule_select"] = (
+                                    single_calc_molecule_names[current_idx + 1]
+                                )
+                    else:
+                        current_index = st.session_state["selected_molecule_index"]
+
+                        def _go_prev():
+                            if st.session_state["selected_molecule_index"] > 0:
+                                st.session_state["selected_molecule_index"] -= 1
+
+                        def _go_next():
+                            if (
+                                st.session_state["selected_molecule_index"]
+                                < len(single_calc_molecule_names) - 1
+                            ):
+                                st.session_state["selected_molecule_index"] += 1
 
                     nav_col_left, nav_col_center, nav_col_right = st.columns([1, 2, 1])
                     with nav_col_left:
@@ -1058,13 +1553,13 @@ def main(data_paths: Optional[List[str]] = None):
                             st.rerun()
                     with nav_col_center:
                         st.write(
-                            f"{current_index + 1} of {len(molecule_names)}",
+                            f"{current_index + 1} of {len(single_calc_molecule_names)}",
                         )
                     with nav_col_right:
                         if st.button(
                             "Next ➡️",
                             use_container_width=True,
-                            disabled=current_index == len(molecule_names) - 1,
+                            disabled=current_index == len(single_calc_molecule_names) - 1,
                             on_click=_go_next,
                         ):
                             st.rerun()
@@ -1117,7 +1612,7 @@ def main(data_paths: Optional[List[str]] = None):
                     metadata_df.columns = ["Value"]
                     st.dataframe(metadata_df, use_container_width=True)
             else:
-                st.warning(f"Molecule '{selected_molecule}' not found in dataset.")
+                st.warning(f"Molecule '{displayed_molecule}' not found in dataset.")
         else:
             st.info("Please select a molecule from the sidebar to view its details.")
 
@@ -1387,8 +1882,16 @@ def main(data_paths: Optional[List[str]] = None):
         else:
             st.info("Not enough numerical columns for correlation analysis.")
 
-        st.subheader("Vibrational Frequencies Analysis")
-        if "vibrational_frequencies_cm^-1" in df.columns:
+        st.subheader("IR Spectrum Analysis")
+        has_ir_spectrum = (
+            "spectrum_frequencies" in df.columns
+            and "spectrum_intensities" in df.columns
+        )
+        has_vibrational_frequencies = (
+            "vibrational_frequencies_cm^-1" in df.columns
+            or "frequencies_cm^-1" in df.columns
+        )
+        if has_ir_spectrum or has_vibrational_frequencies:
             # Get a sample molecule for frequency analysis
             sample_molecule = st.selectbox(
                 "Select molecule for frequency spectrum",
@@ -1398,43 +1901,20 @@ def main(data_paths: Optional[List[str]] = None):
 
             if sample_molecule:
                 mol_data = df[df["unique_name"] == sample_molecule].iloc[0]
-                frequencies = mol_data.get("vibrational_frequencies_cm^-1", None)
 
-                # Check if frequencies exists and is a list or array
-                if frequencies is not None:
-                    if isinstance(frequencies, (list, np.ndarray)):
-                        freq_array = np.array(frequencies)
-                    elif hasattr(frequencies, "__iter__") and not isinstance(frequencies, str):
-                        freq_array = np.array(list(frequencies))
-                    else:
-                        freq_array = None
-                else:
-                    freq_array = None
+                fig_vib = create_molecule_spectrum_plot(
+                    mol_data,
+                    f"IR Spectrum for {sample_molecule}",
+                )
 
-                if freq_array is not None and len(freq_array) > 0:
-                    fig_vib = go.Figure()
-                    fig_vib.add_trace(
-                        go.Scatter(
-                            x=freq_array,
-                            y=[1] * len(freq_array),
-                            mode="markers",
-                            marker=dict(size=10, color="red"),
-                            name="Frequencies",
-                        )
-                    )
-                    fig_vib.update_layout(
-                        title=f"Vibrational Frequencies for {sample_molecule}",
-                        xaxis_title="Frequency (cm⁻¹)",
-                        yaxis_title="",
-                        height=400,
-                    )
+                if fig_vib is not None:
                     st.plotly_chart(fig_vib, use_container_width=True)
                 else:
-                    st.info("No vibrational frequency data available for selected molecule.")
+                    st.info("No IR spectrum or vibrational frequency data available for selected molecule.")
             else:
-                st.info("Please select a molecule to view its vibrational frequencies.")
+                st.info("Please select a molecule to view its IR spectrum.")
         else:
-            st.info("Vibrational frequency data not available in dataset.")
+            st.info("IR spectrum data not available in dataset.")
 
     # ========================================================================
     # Tab 3: Reactions

@@ -7,7 +7,15 @@ from pathlib import Path
 # Add parent directory to path to import the module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from iqc_dashboard.app import render_molecule
+from iqc_dashboard.app import (
+    build_vibrational_frequency_table,
+    create_ir_spectrum_plot,
+    create_molecule_spectrum_plot,
+    create_vibrational_stick_plot,
+    normalize_spectrum_intensities,
+    normalize_vibrational_frequencies,
+    render_molecule,
+)
 
 
 class TestRenderMolecule:
@@ -101,3 +109,109 @@ class TestRenderMolecule:
                         mock_view.setStyle.assert_called_with(
                             {"stick": {}, "sphere": {"radius": 0.3}}
                         )
+
+    def test_normalize_vibrational_frequencies(self):
+        """Test vibrational frequency normalization handles iterable numeric input."""
+        result = normalize_vibrational_frequencies([100, -25.5, 300])
+
+        assert result is not None
+        assert result.tolist() == [100.0, -25.5, 300.0]
+
+    def test_build_vibrational_frequency_table(self):
+        """Test vibrational frequency table labels real and imaginary modes."""
+        result = build_vibrational_frequency_table([-100, 250, 350])
+
+        assert result["Mode"].tolist() == [1, 2, 3]
+        assert result["Frequency (cm^-1)"].tolist() == [-100.0, 250.0, 350.0]
+        assert result["Type"].tolist() == ["Imaginary", "Real", "Real"]
+
+    def test_build_vibrational_frequency_table_with_intensities(self):
+        """Test vibrational frequency table includes matched spectrum intensities."""
+        result = build_vibrational_frequency_table([-100, 250, 350], [0.1, 12.5, 8.0])
+
+        assert result["Intensity"].tolist() == [0.1, 12.5, 8.0]
+
+    def test_normalize_spectrum_intensities_rejects_mismatched_lengths(self):
+        """Test spectrum intensity normalization rejects arrays that do not align."""
+        result = normalize_spectrum_intensities([1.0, 2.0], expected_length=3)
+
+        assert result is None
+
+    def test_create_vibrational_stick_plot(self):
+        """Test vibrational stick plot generation for valid frequencies."""
+        fig = create_vibrational_stick_plot([-50, 100, 200], "Test Spectrum")
+
+        assert fig is not None
+        assert fig.layout.title.text == "Test Spectrum"
+        assert len(fig.data) == 3
+
+    def test_create_vibrational_stick_plot_uses_intensities(self):
+        """Test vibrational stick plot uses provided spectrum intensities."""
+        fig = create_vibrational_stick_plot(
+            [-50, 100, 200],
+            "Test Spectrum",
+            [2.0, 10.0, 5.0],
+        )
+
+        assert fig is not None
+        assert list(fig.data[-1].y) == [2.0, 10.0, 5.0]
+        assert fig.layout.yaxis.title.text == "IR Intensity"
+        assert list(fig.layout.yaxis.range) == [0, 11.0]
+
+    def test_create_vibrational_stick_plot_falls_back_for_mismatched_intensities(self):
+        """Test vibrational stick plot ignores spectrum intensities that do not align."""
+        fig = create_vibrational_stick_plot(
+            [-50, 100, 200],
+            "Test Spectrum",
+            [2.0, 10.0],
+        )
+
+        assert fig is not None
+        assert list(fig.data[-1].y) == [1.0, 1.0, 1.0]
+        assert fig.layout.yaxis.title.text == "Relative Intensity"
+
+    def test_create_ir_spectrum_plot_uses_schema_arrays_and_units(self):
+        """Test IR spectrum plot uses paired spectrum frequency and intensity arrays."""
+        fig = create_ir_spectrum_plot(
+            [100, 200, 300],
+            [0.0, 4.5, 1.2],
+            "IR Spectrum",
+            "cm^-1",
+            "km/mol",
+        )
+
+        assert fig is not None
+        assert list(fig.data[0].x) == [100.0, 200.0, 300.0]
+        assert list(fig.data[0].y) == [0.0, 4.5, 1.2]
+        assert fig.data[0].mode == "lines"
+        assert fig.layout.xaxis.title.text == "Frequency (cm^-1)"
+        assert fig.layout.yaxis.title.text == "IR Intensity (km/mol)"
+
+    def test_create_ir_spectrum_plot_rejects_mismatched_schema_arrays(self):
+        """Test IR spectrum plot returns None when spectrum arrays do not align."""
+        fig = create_ir_spectrum_plot([100, 200, 300], [0.0, 4.5], "IR Spectrum")
+
+        assert fig is None
+
+    def test_create_molecule_spectrum_plot_prefers_spectrum_schema(self):
+        """Test molecule spectrum plot prefers spectrum arrays over vibrational modes."""
+        molecule_data = {
+            "spectrum_frequencies": [100, 200, 300],
+            "spectrum_frequencies_units": "cm^-1",
+            "spectrum_intensities": [0.0, 4.5, 1.2],
+            "spectrum_intensities_units": "km/mol",
+            "vibrational_frequencies_cm^-1": [10, 20],
+        }
+
+        fig = create_molecule_spectrum_plot(molecule_data, "IR Spectrum")
+
+        assert fig is not None
+        assert list(fig.data[0].x) == [100.0, 200.0, 300.0]
+        assert list(fig.data[0].y) == [0.0, 4.5, 1.2]
+        assert fig.layout.yaxis.title.text == "IR Intensity (km/mol)"
+
+    def test_create_vibrational_stick_plot_with_invalid_input(self):
+        """Test vibrational stick plot returns None for invalid input."""
+        fig = create_vibrational_stick_plot("not-a-frequency-list", "Test Spectrum")
+
+        assert fig is None

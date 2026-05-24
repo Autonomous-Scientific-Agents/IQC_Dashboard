@@ -9,7 +9,11 @@ import sys
 # Add parent directory to path to import the module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from iqc_dashboard.app import DataManager, calculate_reaction_gibbs
+from iqc_dashboard.app import (
+    DataManager,
+    build_ligand_selector_df,
+    calculate_reaction_gibbs,
+)
 
 
 class TestDataManager:
@@ -299,3 +303,26 @@ class TestDataManager:
         assert result["G_CO2"].iloc[0] == pytest.approx(expected_co2)
         assert result["deltaG"].iloc[0] == pytest.approx(expected_delta)
 
+    def test_build_ligand_selector_df_filters_non_reaction_rows(self):
+        """Test ligand selector data only keeps rows with parsed bipyridine and ligand values."""
+        test_df = pd.DataFrame(
+            {
+                "unique_name": [
+                    "bipy-A_C2H2_reactant",
+                    "bipy-A_C2H2_product",
+                    "CO2",
+                    "plain_molecule_name",
+                ]
+            }
+        )
+
+        result = build_ligand_selector_df(test_df)
+
+        assert list(result.columns) == ["unique_name", "bipyridine", "alkyne", "role"]
+        assert result["unique_name"].tolist() == [
+            "bipy-A_C2H2_reactant",
+            "bipy-A_C2H2_product",
+        ]
+        assert result["bipyridine"].tolist() == ["A", "A"]
+        assert result["alkyne"].tolist() == ["C2H2", "C2H2"]
+        assert result["role"].tolist() == ["reactant", "product"]
