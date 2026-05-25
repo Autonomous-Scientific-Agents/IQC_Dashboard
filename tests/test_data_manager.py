@@ -14,10 +14,14 @@ from iqc_dashboard.app import (
     ENERGY_UNIT_EV,
     ENERGY_UNIT_KCAL,
     build_all_data_table,
+    build_comparison_metric_table,
+    build_row_comparison_table,
     build_ligand_selector_df,
     calculate_reaction_gibbs,
     convert_energy_value,
     energy_metadata_label,
+    parquet_files_have_same_dimensions,
+    parquet_files_have_same_schema,
 )
 
 
@@ -279,6 +283,95 @@ class TestDataManager:
                 assert "mol_001" in names
                 assert "mol_002" in names
                 assert "mol_003" in names
+
+    def test_get_comparison_data_matches_rows_by_initial_smiles(self, temp_dir):
+        """Test comparison data matches rows with identical initial molecules."""
+        df_one = pd.DataFrame(
+            {
+                "unique_name": ["mol_water_a", "mol_co2_a", "mol_nh3_a"],
+                "initial_smiles": ["O", "O=C=O", "N"],
+                "formula": ["H2O", "CO2", "NH3"],
+                "opt_energy_eV": [-10.0, -20.0, -15.0],
+                "opt_converged": [True, True, False],
+            }
+        )
+        df_two = pd.DataFrame(
+            {
+                "unique_name": ["mol_nh3_b", "mol_water_b", "mol_co2_b"],
+                "initial_smiles": ["N", "O", "O=C=O"],
+                "formula": ["NH3", "H2O", "CO2"],
+                "opt_energy_eV": [-14.8, -10.2, -20.3],
+                "opt_converged": [True, True, True],
+            }
+        )
+
+        file_one = Path(temp_dir) / "method_a.parquet"
+        file_two = Path(temp_dir) / "method_b.parquet"
+        df_one.to_parquet(file_one)
+        df_two.to_parquet(file_two)
+
+        dm = DataManager(temp_dir)
+        dm.parquet_files = [str(file_one), str(file_two)]
+        parquet_hash = dm._get_parquet_files_hash()
+
+        summaries = dm.get_parquet_file_summaries(parquet_hash)
+        assert parquet_files_have_same_dimensions(summaries)
+        assert parquet_files_have_same_schema(summaries)
+
+        comparison = dm.get_comparison_data(parquet_hash, "initial_smiles")
+        matched_rows = comparison["matched_rows"]
+
+        assert comparison["error"] is None
+        assert matched_rows["_comparison_match_id"].nunique() == 3
+        assert len(matched_rows) == 6
+
+        water_rows = matched_rows[matched_rows["_comparison_key"] == "O"].sort_values(
+            "_comparison_file_order"
+        )
+        assert water_rows["unique_name"].tolist() == ["mol_water_a", "mol_water_b"]
+        assert water_rows["_comparison_row_number"].tolist() == [1, 2]
+
+        metric_table = build_comparison_metric_table(
+            matched_rows,
+            "opt_energy_eV",
+            ENERGY_UNIT_EV,
+        )
+        water_metric = metric_table[metric_table["Initial Molecule"] == "O"].iloc[0]
+        assert water_metric["method_a.parquet"] == pytest.approx(-10.0)
+        assert water_metric["method_b.parquet"] == pytest.approx(-10.2)
+        assert water_metric["Range"] == pytest.approx(0.2)
+
+        row_comparison = build_row_comparison_table(water_rows, ENERGY_UNIT_EV)
+        assert "unique_name" in row_comparison["Field"].tolist()
+        assert "opt_energy (eV)" in row_comparison["Field"].tolist()
+
+    def test_get_comparison_data_rejects_dimension_mismatch(self, temp_dir):
+        """Test comparison data rejects parquet files with different dimensions."""
+        df_one = pd.DataFrame(
+            {
+                "unique_name": ["mol_water_a", "mol_co2_a", "mol_nh3_a"],
+                "initial_smiles": ["O", "O=C=O", "N"],
+                "opt_energy_eV": [-10.0, -20.0, -15.0],
+            }
+        )
+        df_two = df_one.head(2).copy()
+
+        file_one = Path(temp_dir) / "method_a.parquet"
+        file_two = Path(temp_dir) / "method_b.parquet"
+        df_one.to_parquet(file_one)
+        df_two.to_parquet(file_two)
+
+        dm = DataManager(temp_dir)
+        dm.parquet_files = [str(file_one), str(file_two)]
+        parquet_hash = dm._get_parquet_files_hash()
+
+        summaries = dm.get_parquet_file_summaries(parquet_hash)
+        assert not parquet_files_have_same_dimensions(summaries)
+
+        comparison = dm.get_comparison_data(parquet_hash, "initial_smiles")
+
+        assert comparison["matched_rows"].empty
+        assert comparison["error"] == "Parquet files must have matching row and column counts."
 
     def test_calculate_reaction_gibbs_kcal_conversion(self):
         """Test reaction Gibbs calculation converts eV to kcal/mol and computes ΔG."""

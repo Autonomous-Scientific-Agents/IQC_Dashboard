@@ -10,7 +10,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
 import tempfile
-from typing import Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple
 import numpy as np
 import re
 import difflib
@@ -34,6 +34,27 @@ COVALENT_RADII_ANGSTROM = {
     "Br": 1.20,
     "I": 1.39,
 }
+COMPARISON_KEY_CANDIDATES = (
+    "initial_smiles",
+    "initial_xyz",
+    "unique_name",
+)
+COMPARISON_SUMMARY_COLUMNS = (
+    "unique_name",
+    "formula",
+    "calculator",
+    "model",
+    "task",
+    "opt_converged",
+    "initial_energy_eV",
+    "opt_energy_eV",
+    "G_eV",
+    "H_eV",
+    "E_ZPE_eV",
+    "opt_steps",
+    "opt_time",
+    "number_of_imaginary",
+)
 
 # Import 3D visualization libraries - will be checked when needed
 STMOL_AVAILABLE = False
@@ -409,6 +430,170 @@ class DataManager:
             st.error(f"Error fetching molecule by index: {e}")
             return None
 
+    @st.cache_data(ttl=3600)
+    def get_parquet_file_summaries(_self, parquet_files_hash: str) -> pd.DataFrame:
+        """Get row counts, column counts, and schema names for each loaded parquet file."""
+        if not _self.parquet_files:
+            return pd.DataFrame()
+
+        file_labels = make_unique_file_labels(_self.parquet_files)
+        rows = []
+        for file_order, (file_path, file_label) in enumerate(
+            zip(_self.parquet_files, file_labels)
+        ):
+            try:
+                try:
+                    import pyarrow.parquet as pq
+
+                    parquet_file = pq.ParquetFile(file_path)
+                    row_count = parquet_file.metadata.num_rows
+                    column_names = tuple(parquet_file.schema_arrow.names)
+                except Exception:
+                    parquet_df = pd.read_parquet(file_path)
+                    row_count = len(parquet_df)
+                    column_names = tuple(parquet_df.columns)
+
+                rows.append(
+                    {
+                        "file_order": file_order,
+                        "file": file_label,
+                        "path": file_path,
+                        "rows": row_count,
+                        "columns": len(column_names),
+                        "column_names": column_names,
+                        "error": None,
+                    }
+                )
+            except Exception as e:
+                rows.append(
+                    {
+                        "file_order": file_order,
+                        "file": file_label,
+                        "path": file_path,
+                        "rows": None,
+                        "columns": None,
+                        "column_names": tuple(),
+                        "error": str(e),
+                    }
+                )
+
+        return pd.DataFrame(rows)
+
+    @st.cache_data(ttl=3600)
+    def get_comparison_data(
+        _self,
+        parquet_files_hash: str,
+        key_column: str,
+    ) -> Dict[str, Any]:
+        """Load same-dimension parquet files and match rows by an initial-molecule key."""
+        file_summaries = _self.get_parquet_file_summaries(parquet_files_hash)
+        result: Dict[str, Any] = {
+            "file_summaries": file_summaries,
+            "matched_rows": pd.DataFrame(),
+            "duplicate_summary": pd.DataFrame(),
+            "error": None,
+        }
+
+        if not parquet_files_have_same_dimensions(file_summaries):
+            result["error"] = "Parquet files must have matching row and column counts."
+            return result
+
+        if not parquet_files_have_same_schema(file_summaries):
+            result["error"] = "Parquet files must have matching column names."
+            return result
+
+        available_keys = get_available_comparison_key_columns(file_summaries)
+        if key_column not in available_keys:
+            result["error"] = f"Column '{key_column}' is not available in every file."
+            return result
+
+        file_frames = []
+        duplicate_rows = []
+        for summary_row in file_summaries.sort_values("file_order").itertuples(index=False):
+            try:
+                file_df = pd.read_parquet(summary_row.path).copy()
+            except Exception as e:
+                result["error"] = f"Unable to read {summary_row.file}: {e}"
+                return result
+
+            file_df["_comparison_file_label"] = summary_row.file
+            file_df["_comparison_file_order"] = summary_row.file_order
+            file_df["_comparison_row_number"] = np.arange(1, len(file_df) + 1)
+            file_df["_comparison_key"] = file_df[key_column].map(
+                lambda value: normalize_comparison_key(value, key_column)
+            )
+            file_df = file_df[
+                file_df["_comparison_key"].notna()
+                & (file_df["_comparison_key"].astype(str) != "")
+            ].copy()
+            file_df["_comparison_occurrence"] = (
+                file_df.groupby("_comparison_key", sort=False).cumcount() + 1
+            )
+
+            duplicate_counts = (
+                file_df["_comparison_key"]
+                .value_counts()
+                .rename_axis("_comparison_key")
+                .reset_index(name="count")
+            )
+            duplicate_counts = duplicate_counts[duplicate_counts["count"] > 1]
+            if not duplicate_counts.empty:
+                duplicate_counts["file"] = summary_row.file
+                duplicate_rows.append(duplicate_counts)
+
+            file_frames.append(file_df)
+
+        if not file_frames:
+            return result
+
+        long_df = pd.concat(file_frames, ignore_index=True, sort=False)
+        match_counts = (
+            long_df.groupby(["_comparison_key", "_comparison_occurrence"])[
+                "_comparison_file_label"
+            ]
+            .nunique()
+            .reset_index(name="file_count")
+        )
+        common_matches = match_counts[
+            match_counts["file_count"] == len(file_frames)
+        ][["_comparison_key", "_comparison_occurrence"]]
+
+        if common_matches.empty:
+            if duplicate_rows:
+                result["duplicate_summary"] = pd.concat(
+                    duplicate_rows,
+                    ignore_index=True,
+                )
+            return result
+
+        matched_df = long_df.merge(
+            common_matches,
+            on=["_comparison_key", "_comparison_occurrence"],
+            how="inner",
+        )
+        matched_df["_comparison_match_id"] = matched_df.apply(
+            lambda row: build_comparison_match_id(
+                row["_comparison_key"],
+                row["_comparison_occurrence"],
+            ),
+            axis=1,
+        )
+        matched_df["_comparison_molecule_label"] = matched_df.apply(
+            lambda row: format_comparison_molecule_label(
+                row["_comparison_key"],
+                row["_comparison_occurrence"],
+            ),
+            axis=1,
+        )
+        matched_df = matched_df.sort_values(
+            ["_comparison_molecule_label", "_comparison_file_order"]
+        ).reset_index(drop=True)
+
+        result["matched_rows"] = matched_df
+        if duplicate_rows:
+            result["duplicate_summary"] = pd.concat(duplicate_rows, ignore_index=True)
+        return result
+
     @st.cache_data(ttl=3600)  # Cache for 1 hour
     def get_all_molecule_names(_self, parquet_files_hash: str) -> List[str]:
         """Get all unique molecule names for the selector. Cached based on parquet files."""
@@ -773,6 +958,260 @@ def build_all_data_table(molecule_data: pd.Series, energy_unit: str) -> pd.DataF
         )
 
     return pd.DataFrame(rows, columns=["Field", "Value"])
+
+
+def make_unique_file_labels(file_paths: List[str]) -> List[str]:
+    """Return stable, readable file labels for display."""
+    names = [Path(file_path).name for file_path in file_paths]
+    name_counts = pd.Series(names).value_counts().to_dict()
+    seen_counts: Dict[str, int] = {}
+    labels = []
+
+    for name in names:
+        if name_counts[name] == 1:
+            labels.append(name)
+            continue
+
+        seen_counts[name] = seen_counts.get(name, 0) + 1
+        labels.append(f"{name} ({seen_counts[name]})")
+
+    return labels
+
+
+def parquet_files_have_same_dimensions(file_summaries: pd.DataFrame) -> bool:
+    """Return True when multiple parquet files have matching row and column counts."""
+    if file_summaries.empty or len(file_summaries) < 2:
+        return False
+    if "error" in file_summaries.columns and file_summaries["error"].notna().any():
+        return False
+    return (
+        file_summaries["rows"].nunique(dropna=False) == 1
+        and file_summaries["columns"].nunique(dropna=False) == 1
+    )
+
+
+def parquet_files_have_same_schema(file_summaries: pd.DataFrame) -> bool:
+    """Return True when same-dimension parquet files also have identical column names."""
+    if not parquet_files_have_same_dimensions(file_summaries):
+        return False
+    first_columns = tuple(file_summaries["column_names"].iloc[0])
+    return all(tuple(column_names) == first_columns for column_names in file_summaries["column_names"])
+
+
+def get_available_comparison_key_columns(file_summaries: pd.DataFrame) -> List[str]:
+    """Return candidate row-matching columns available in every loaded file."""
+    if file_summaries.empty or "column_names" not in file_summaries.columns:
+        return []
+
+    common_columns = set(file_summaries["column_names"].iloc[0])
+    for column_names in file_summaries["column_names"].iloc[1:]:
+        common_columns &= set(column_names)
+
+    return [column for column in COMPARISON_KEY_CANDIDATES if column in common_columns]
+
+
+def get_default_comparison_key_column(available_columns: List[str]) -> Optional[str]:
+    """Choose the default comparison key from preferred initial-molecule columns."""
+    for candidate in COMPARISON_KEY_CANDIDATES:
+        if candidate in available_columns:
+            return candidate
+    return available_columns[0] if available_columns else None
+
+
+def normalize_xyz_comparison_key(xyz_string: str) -> Optional[str]:
+    """Normalize XYZ geometry text for exact initial-geometry comparisons."""
+    parsed_xyz = parse_xyz_coordinates(xyz_string)
+    if parsed_xyz is None:
+        return None
+
+    elements, coords = parsed_xyz
+    normalized_lines = []
+    for element, coord in zip(elements, coords):
+        normalized_lines.append(
+            f"{element} {float(coord[0]):.8f} {float(coord[1]):.8f} {float(coord[2]):.8f}"
+        )
+    return "\n".join(normalized_lines)
+
+
+def normalize_comparison_key(value, key_column: str) -> Optional[str]:
+    """Normalize an initial-molecule key value for matching rows across files."""
+    if is_missing_scalar(value):
+        return None
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+
+    if key_column == "initial_xyz":
+        normalized_xyz = normalize_xyz_comparison_key(str(value))
+        if normalized_xyz is not None:
+            return normalized_xyz
+
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return None
+    return "\n".join(line.rstrip() for line in text.splitlines()).strip()
+
+
+def shorten_comparison_text(value, max_length: int = 90) -> str:
+    """Shorten long comparison labels while preserving enough identifying text."""
+    text = " ".join(str(value).split())
+    if len(text) <= max_length:
+        return text
+    return f"{text[: max_length - 3]}..."
+
+
+def build_comparison_match_id(comparison_key: str, occurrence: int) -> str:
+    """Build a compact stable ID for one matched molecule occurrence."""
+    digest = hashlib.md5(str(comparison_key).encode()).hexdigest()[:12]
+    return f"{digest}:{int(occurrence)}"
+
+
+def format_comparison_molecule_label(comparison_key: str, occurrence: int) -> str:
+    """Format a matched initial molecule for selectboxes and tables."""
+    label = shorten_comparison_text(comparison_key)
+    if int(occurrence) > 1:
+        return f"{label} #{int(occurrence)}"
+    return label
+
+
+def get_comparison_numeric_columns(matched_rows: pd.DataFrame) -> List[str]:
+    """Return original columns that can be compared numerically."""
+    if matched_rows.empty:
+        return []
+
+    metadata_columns = {column for column in matched_rows.columns if column.startswith("_comparison_")}
+    numeric_columns = []
+    for column in matched_rows.columns:
+        if column in metadata_columns:
+            continue
+        numeric_series = pd.to_numeric(matched_rows[column], errors="coerce")
+        if numeric_series.notna().any():
+            numeric_columns.append(column)
+
+    preferred_columns = [
+        "opt_energy_eV",
+        "G_eV",
+        "H_eV",
+        "E_ZPE_eV",
+        "initial_energy_eV",
+        "opt_time",
+        "opt_steps",
+        "number_of_imaginary",
+    ]
+    ordered = [column for column in preferred_columns if column in numeric_columns]
+    ordered.extend(column for column in numeric_columns if column not in ordered)
+    return ordered
+
+
+def build_comparison_metric_table(
+    matched_rows: pd.DataFrame,
+    metric_column: str,
+    energy_unit: str,
+) -> pd.DataFrame:
+    """Build a per-molecule, per-file metric comparison table with range values."""
+    if matched_rows.empty or metric_column not in matched_rows.columns:
+        return pd.DataFrame()
+
+    value_series = pd.to_numeric(matched_rows[metric_column], errors="coerce")
+    if value_series.notna().sum() == 0:
+        return pd.DataFrame()
+
+    display_values = value_series.copy()
+    if is_energy_metadata_column(metric_column):
+        display_values = display_values * energy_conversion_factor(energy_unit)
+
+    metric_df = matched_rows[
+        [
+            "_comparison_match_id",
+            "_comparison_molecule_label",
+            "_comparison_file_label",
+        ]
+    ].copy()
+    metric_df["_comparison_value"] = display_values
+
+    pivot_df = metric_df.pivot_table(
+        index=["_comparison_match_id", "_comparison_molecule_label"],
+        columns="_comparison_file_label",
+        values="_comparison_value",
+        aggfunc="first",
+    )
+    file_columns = list(pivot_df.columns)
+    pivot_df["Range"] = pivot_df[file_columns].max(axis=1) - pivot_df[file_columns].min(axis=1)
+    pivot_df["Mean"] = pivot_df[file_columns].mean(axis=1)
+    pivot_df = pivot_df.sort_values("Range", ascending=False).reset_index()
+    pivot_df = pivot_df.rename(
+        columns={
+            "_comparison_molecule_label": "Initial Molecule",
+            "_comparison_match_id": "Match ID",
+        }
+    )
+    return pivot_df[["Initial Molecule", *file_columns, "Range", "Mean", "Match ID"]]
+
+
+def build_selected_comparison_summary(
+    matched_rows: pd.DataFrame,
+    energy_unit: str,
+) -> pd.DataFrame:
+    """Build a compact per-file summary for one matched initial molecule."""
+    if matched_rows.empty:
+        return pd.DataFrame()
+
+    columns = [
+        column for column in COMPARISON_SUMMARY_COLUMNS if column in matched_rows.columns
+    ]
+    display_rows = []
+    for _, row in matched_rows.sort_values("_comparison_file_order").iterrows():
+        display_row = {
+            "File": row["_comparison_file_label"],
+            "Row": int(row["_comparison_row_number"]),
+        }
+        for column in columns:
+            display_row[energy_metadata_label(column, energy_unit)] = format_all_data_value(
+                column,
+                row[column],
+                energy_unit,
+            )
+        display_rows.append(display_row)
+
+    return pd.DataFrame(display_rows)
+
+
+def build_row_comparison_table(
+    matched_rows: pd.DataFrame,
+    energy_unit: str,
+    show_unchanged: bool = False,
+) -> pd.DataFrame:
+    """Build a field-by-field comparison table for one matched initial molecule."""
+    if matched_rows.empty:
+        return pd.DataFrame()
+
+    sorted_rows = matched_rows.sort_values("_comparison_file_order")
+    file_labels = sorted_rows["_comparison_file_label"].tolist()
+    metadata_columns = {
+        column for column in sorted_rows.columns if column.startswith("_comparison_")
+    }
+
+    comparison_rows = []
+    for column in sorted_rows.columns:
+        if column in metadata_columns:
+            continue
+
+        display_values = [
+            format_all_data_value(column, row[column], energy_unit)
+            for _, row in sorted_rows.iterrows()
+        ]
+        changed = len(set(display_values)) > 1
+        if not show_unchanged and not changed:
+            continue
+
+        comparison_row = {
+            "Field": energy_metadata_label(column, energy_unit),
+            "Changed": changed,
+        }
+        for file_label, display_value in zip(file_labels, display_values):
+            comparison_row[file_label] = display_value
+        comparison_rows.append(comparison_row)
+
+    return pd.DataFrame(comparison_rows)
 
 
 def normalize_element_symbol(raw_symbol: str) -> Optional[str]:
@@ -1806,8 +2245,20 @@ def main(data_paths: Optional[List[str]] = None):
         )
         return
 
+    parquet_hash = data_manager._get_parquet_files_hash()
+    comparison_file_summaries = data_manager.get_parquet_file_summaries(parquet_hash)
+    show_comparison_tab = parquet_files_have_same_dimensions(comparison_file_summaries)
+
     # Create tabs
-    tab1, tab2, tab3 = st.tabs(["🔬 Single Calculation", "📊 Dataset Analytics", "⚗️ Reactions"])
+    tab_labels = ["🔬 Single Calculation", "📊 Dataset Analytics"]
+    if show_comparison_tab:
+        tab_labels.append("🔁 Comparison")
+    tab_labels.append("⚗️ Reactions")
+    tabs = st.tabs(tab_labels)
+    tab1 = tabs[0]
+    tab2 = tabs[1]
+    comparison_tab = tabs[2] if show_comparison_tab else None
+    tab3 = tabs[-1]
 
     # ========================================================================
     # Tab 1: Single Calculation
@@ -2507,6 +2958,204 @@ def main(data_paths: Optional[List[str]] = None):
                 st.info("Please select a molecule to view its IR spectrum.")
         else:
             st.info("IR spectrum data not available in dataset.")
+
+    # ========================================================================
+    # Comparison Tab: File-aware row comparison
+    # ========================================================================
+    if comparison_tab is not None:
+        with comparison_tab:
+            st.subheader("Parquet File Comparison")
+
+            display_summary = comparison_file_summaries[
+                ["file", "rows", "columns", "error"]
+            ].copy()
+            display_summary.columns = ["File", "Rows", "Columns", "Error"]
+            st.dataframe(display_summary, use_container_width=True, hide_index=True)
+
+            if not parquet_files_have_same_schema(comparison_file_summaries):
+                st.warning(
+                    "Comparison requires files with matching column names as well as "
+                    "matching row and column counts."
+                )
+            else:
+                available_key_columns = get_available_comparison_key_columns(
+                    comparison_file_summaries
+                )
+                default_key_column = get_default_comparison_key_column(
+                    available_key_columns
+                )
+
+                if not default_key_column:
+                    st.warning(
+                        "No supported initial molecule key column is present in every file."
+                    )
+                else:
+                    selected_key_column = st.selectbox(
+                        "Initial molecule key",
+                        options=available_key_columns,
+                        index=available_key_columns.index(default_key_column),
+                        key="comparison_key_column",
+                    )
+
+                    with st.spinner("Matching rows across files..."):
+                        comparison_data = data_manager.get_comparison_data(
+                            parquet_hash,
+                            selected_key_column,
+                        )
+
+                    if comparison_data.get("error"):
+                        st.warning(comparison_data["error"])
+                    else:
+                        matched_rows = comparison_data["matched_rows"]
+                        duplicate_summary = comparison_data["duplicate_summary"]
+
+                        if matched_rows.empty:
+                            st.warning(
+                                "No rows share the selected initial molecule key "
+                                "across every loaded file."
+                            )
+                        else:
+                            matched_molecule_count = matched_rows[
+                                "_comparison_match_id"
+                            ].nunique()
+                            file_count = matched_rows["_comparison_file_label"].nunique()
+
+                            col_cmp1, col_cmp2, col_cmp3, col_cmp4 = st.columns(4)
+                            with col_cmp1:
+                                st.metric("Files", int(file_count))
+                            with col_cmp2:
+                                rows_per_file = int(
+                                    comparison_file_summaries["rows"].iloc[0]
+                                )
+                                st.metric("Rows per File", rows_per_file)
+                            with col_cmp3:
+                                st.metric(
+                                    "Matched Initial Molecules",
+                                    int(matched_molecule_count),
+                                )
+                            with col_cmp4:
+                                st.metric("Compared Rows", int(len(matched_rows)))
+
+                            if not duplicate_summary.empty:
+                                with st.expander("Duplicate initial molecule keys", expanded=False):
+                                    duplicate_display = duplicate_summary.copy()
+                                    duplicate_display["_comparison_key"] = duplicate_display[
+                                        "_comparison_key"
+                                    ].map(shorten_comparison_text)
+                                    duplicate_display.columns = [
+                                        "Initial Molecule",
+                                        "Count",
+                                        "File",
+                                    ]
+                                    st.dataframe(
+                                        duplicate_display,
+                                        use_container_width=True,
+                                        hide_index=True,
+                                    )
+
+                            numeric_columns = get_comparison_numeric_columns(matched_rows)
+                            if numeric_columns:
+                                metric_options = {
+                                    energy_metadata_label(column, energy_unit): column
+                                    for column in numeric_columns
+                                }
+                                selected_metric_label = st.selectbox(
+                                    "Comparison metric",
+                                    options=list(metric_options.keys()),
+                                    key="comparison_metric_column",
+                                )
+                                selected_metric_column = metric_options[selected_metric_label]
+                                metric_table = build_comparison_metric_table(
+                                    matched_rows,
+                                    selected_metric_column,
+                                    energy_unit,
+                                )
+
+                                if not metric_table.empty:
+                                    st.subheader(f"{selected_metric_label} by File")
+                                    metric_display = metric_table.drop(columns=["Match ID"])
+                                    st.dataframe(
+                                        metric_display,
+                                        use_container_width=True,
+                                        hide_index=True,
+                                    )
+
+                                    plot_df = metric_table.head(25)
+                                    fig_metric = px.bar(
+                                        plot_df,
+                                        x="Initial Molecule",
+                                        y="Range",
+                                        labels={
+                                            "Initial Molecule": "Initial Molecule",
+                                            "Range": f"Range ({selected_metric_label})",
+                                        },
+                                        title=f"Largest {selected_metric_label} Differences",
+                                    )
+                                    fig_metric.update_layout(xaxis_tickangle=-45)
+                                    st.plotly_chart(fig_metric, use_container_width=True)
+
+                            st.markdown("---")
+                            st.subheader("Matched Row Details")
+
+                            match_options = (
+                                matched_rows[
+                                    [
+                                        "_comparison_match_id",
+                                        "_comparison_key",
+                                        "_comparison_occurrence",
+                                        "_comparison_molecule_label",
+                                    ]
+                                ]
+                                .drop_duplicates()
+                                .sort_values("_comparison_molecule_label")
+                                .reset_index(drop=True)
+                            )
+                            selected_option_index = st.selectbox(
+                                "Initial molecule",
+                                options=list(match_options.index),
+                                format_func=lambda option_index: match_options.loc[
+                                    option_index,
+                                    "_comparison_molecule_label",
+                                ],
+                                key="comparison_selected_molecule",
+                            )
+                            selected_match_id = match_options.loc[
+                                selected_option_index,
+                                "_comparison_match_id",
+                            ]
+                            selected_rows = matched_rows[
+                                matched_rows["_comparison_match_id"] == selected_match_id
+                            ]
+
+                            selected_summary = build_selected_comparison_summary(
+                                selected_rows,
+                                energy_unit,
+                            )
+                            if not selected_summary.empty:
+                                st.dataframe(
+                                    selected_summary,
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
+
+                            show_unchanged_fields = st.checkbox(
+                                "Show unchanged fields",
+                                value=False,
+                                key="comparison_show_unchanged_fields",
+                            )
+                            row_comparison = build_row_comparison_table(
+                                selected_rows,
+                                energy_unit,
+                                show_unchanged=show_unchanged_fields,
+                            )
+                            if row_comparison.empty:
+                                st.info("No changed fields for the selected row.")
+                            else:
+                                st.dataframe(
+                                    row_comparison,
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
 
     # ========================================================================
     # Tab 3: Reactions
