@@ -1214,6 +1214,363 @@ def build_row_comparison_table(
     return pd.DataFrame(comparison_rows)
 
 
+def compare_optimized_geometry_pair(
+    reference_row: pd.Series,
+    comparison_row: pd.Series,
+    reference_label: str,
+    comparison_label: str,
+    limit: int = 10,
+) -> dict:
+    """Compare optimized geometries for two rows representing the same initial molecule."""
+    reference_parsed = parse_xyz_coordinates(reference_row.get("opt_xyz", None))
+    comparison_parsed = parse_xyz_coordinates(comparison_row.get("opt_xyz", None))
+    if reference_parsed is None:
+        return {"error": f"{reference_label}: optimized XYZ is unavailable."}
+    if comparison_parsed is None:
+        return {"error": f"{comparison_label}: optimized XYZ is unavailable."}
+
+    reference_elements, reference_coords = reference_parsed
+    comparison_elements, comparison_coords = comparison_parsed
+    if (
+        reference_elements != comparison_elements
+        or len(reference_coords) != len(comparison_coords)
+    ):
+        return {
+            "error": (
+                f"{comparison_label}: optimized atom list does not match "
+                f"{reference_label}."
+            )
+        }
+
+    heavy_indices = [
+        index for index, element in enumerate(reference_elements) if element.upper() != "H"
+    ]
+    fit_indices = heavy_indices or list(range(len(reference_elements)))
+    aligned_comparison_coords = align_coordinates(
+        reference_coords,
+        comparison_coords,
+        fit_indices,
+    )
+    displacements = np.linalg.norm(aligned_comparison_coords - reference_coords, axis=1)
+    heavy_rmsd = float(np.sqrt(np.mean(displacements[fit_indices] ** 2)))
+    max_displacement = float(np.max(displacements)) if len(displacements) else 0.0
+
+    reference_bonds = infer_bonds(reference_elements, reference_coords)
+    comparison_bonds = infer_bonds(reference_elements, comparison_coords)
+    bonds = reference_bonds | comparison_bonds
+    adjacency = build_bond_adjacency(bonds, len(reference_elements))
+
+    bond_rows = []
+    for atom_i, atom_j in sorted(bonds):
+        reference_distance = calculate_distance(reference_coords, atom_i, atom_j)
+        comparison_distance = calculate_distance(comparison_coords, atom_i, atom_j)
+        bond_rows.append(
+            {
+                "Reference File": reference_label,
+                "Comparison File": comparison_label,
+                "Bond": (
+                    f"{atom_label(reference_elements, atom_i)}-"
+                    f"{atom_label(reference_elements, atom_j)}"
+                ),
+                "Reference (Å)": reference_distance,
+                "Comparison (Å)": comparison_distance,
+                "Δ (Å)": comparison_distance - reference_distance,
+            }
+        )
+
+    angle_rows = []
+    for atom_i, atom_j, atom_k in find_angle_tuples(adjacency):
+        reference_angle = calculate_angle(reference_coords, atom_i, atom_j, atom_k)
+        comparison_angle = calculate_angle(comparison_coords, atom_i, atom_j, atom_k)
+        if not np.isfinite(reference_angle) or not np.isfinite(comparison_angle):
+            continue
+        angle_rows.append(
+            {
+                "Reference File": reference_label,
+                "Comparison File": comparison_label,
+                "Angle": (
+                    f"{atom_label(reference_elements, atom_i)}-"
+                    f"{atom_label(reference_elements, atom_j)}-"
+                    f"{atom_label(reference_elements, atom_k)}"
+                ),
+                "Reference (°)": reference_angle,
+                "Comparison (°)": comparison_angle,
+                "Δ (°)": comparison_angle - reference_angle,
+            }
+        )
+
+    return {
+        "error": None,
+        "metrics": {
+            "Reference File": reference_label,
+            "Comparison File": comparison_label,
+            "Compared Atoms": len(reference_elements),
+            "Heavy-atom RMSD (Å)": heavy_rmsd,
+            "Max Atom Displacement (Å)": max_displacement,
+        },
+        "bond_changes": rank_geometry_changes(bond_rows, "Δ (Å)", limit),
+        "angle_changes": rank_geometry_changes(angle_rows, "Δ (°)", limit),
+    }
+
+
+def sort_geometry_change_dataframe(
+    change_df: pd.DataFrame,
+    delta_column: str,
+) -> pd.DataFrame:
+    """Sort an existing geometry-change table by absolute delta."""
+    if change_df.empty or delta_column not in change_df.columns:
+        return change_df
+    sorted_df = change_df.copy()
+    sorted_df["_abs_delta"] = sorted_df[delta_column].abs()
+    sorted_df = sorted_df.sort_values("_abs_delta", ascending=False)
+    return sorted_df.drop(columns=["_abs_delta"]).reset_index(drop=True)
+
+
+def build_optimized_geometry_comparison(
+    matched_rows: pd.DataFrame,
+    reference_file_label: str,
+    limit: int = 10,
+) -> dict:
+    """Build optimized-geometry comparisons for one matched molecule across files."""
+    result = {
+        "metrics": pd.DataFrame(),
+        "bond_changes": pd.DataFrame(),
+        "angle_changes": pd.DataFrame(),
+        "errors": [],
+    }
+    if matched_rows.empty or "_comparison_file_label" not in matched_rows.columns:
+        return result
+
+    sorted_rows = matched_rows.sort_values("_comparison_file_order")
+    reference_matches = sorted_rows[
+        sorted_rows["_comparison_file_label"] == reference_file_label
+    ]
+    if reference_matches.empty:
+        result["errors"].append(f"Reference file '{reference_file_label}' was not found.")
+        return result
+
+    reference_row = reference_matches.iloc[0]
+    metric_rows = []
+    bond_tables = []
+    angle_tables = []
+
+    for _, comparison_row in sorted_rows.iterrows():
+        comparison_label = comparison_row["_comparison_file_label"]
+        if comparison_label == reference_file_label:
+            continue
+
+        pair_result = compare_optimized_geometry_pair(
+            reference_row,
+            comparison_row,
+            reference_file_label,
+            comparison_label,
+            limit=limit,
+        )
+        if pair_result.get("error"):
+            result["errors"].append(pair_result["error"])
+            continue
+
+        metric_rows.append(pair_result["metrics"])
+        if not pair_result["bond_changes"].empty:
+            bond_tables.append(pair_result["bond_changes"])
+        if not pair_result["angle_changes"].empty:
+            angle_tables.append(pair_result["angle_changes"])
+
+    if metric_rows:
+        result["metrics"] = pd.DataFrame(metric_rows)
+    if bond_tables:
+        result["bond_changes"] = sort_geometry_change_dataframe(
+            pd.concat(bond_tables, ignore_index=True),
+            "Δ (Å)",
+        ).head(limit)
+    if angle_tables:
+        result["angle_changes"] = sort_geometry_change_dataframe(
+            pd.concat(angle_tables, ignore_index=True),
+            "Δ (°)",
+        ).head(limit)
+
+    return result
+
+
+def extract_ir_spectrum_dataset(row: pd.Series) -> Optional[dict]:
+    """Extract paired IR spectrum arrays from a comparison row."""
+    frequencies = normalize_vibrational_frequencies(row.get("spectrum_frequencies", None))
+    if frequencies is None:
+        return None
+
+    intensities = normalize_spectrum_intensities(
+        row.get("spectrum_intensities", None),
+        len(frequencies),
+    )
+    if intensities is None:
+        return None
+
+    return {
+        "file": row["_comparison_file_label"],
+        "frequencies": frequencies,
+        "intensities": intensities,
+        "frequency_unit": _clean_unit(row.get("spectrum_frequencies_units", None))
+        or "cm^-1",
+        "intensity_unit": _clean_unit(row.get("spectrum_intensities_units", None)),
+    }
+
+
+def extract_vibrational_frequency_dataset(row: pd.Series) -> Optional[dict]:
+    """Extract vibrational frequency arrays from a comparison row."""
+    frequencies = normalize_vibrational_frequencies(
+        _get_first_present(
+            row,
+            ("vibrational_frequencies_cm^-1", "frequencies_cm^-1"),
+        )
+    )
+    if frequencies is None:
+        return None
+
+    intensities = normalize_spectrum_intensities(
+        row.get("spectrum_intensities", None),
+        len(frequencies),
+    )
+    return {
+        "file": row["_comparison_file_label"],
+        "frequencies": frequencies,
+        "intensities": intensities,
+    }
+
+
+def format_frequency_range(frequencies: np.ndarray, unit: str = "cm^-1") -> str:
+    """Format a frequency range for summary display."""
+    if len(frequencies) == 0:
+        return "N/A"
+    return f"{float(np.min(frequencies)):.2f} to {float(np.max(frequencies)):.2f} {unit}"
+
+
+def build_spectrum_summary_row(dataset: dict, data_type: str) -> dict:
+    """Build one summary row for comparison spectrum data."""
+    intensity_text = "Available" if dataset.get("intensities") is not None else "Relative"
+    if dataset.get("intensity_unit"):
+        intensity_text = f"Available ({dataset['intensity_unit']})"
+
+    return {
+        "File": dataset["file"],
+        "Data": data_type,
+        "Points/Modes": int(len(dataset["frequencies"])),
+        "Frequency Range": format_frequency_range(
+            dataset["frequencies"],
+            dataset.get("frequency_unit", "cm^-1"),
+        ),
+        "Intensity": intensity_text,
+    }
+
+
+def create_comparison_spectrum_plot(
+    matched_rows: pd.DataFrame,
+    title: str,
+) -> Tuple[Optional[go.Figure], pd.DataFrame, str]:
+    """Create an overlay plot for IR spectra, or vibrational frequencies as fallback."""
+    if matched_rows.empty:
+        return None, pd.DataFrame(), "None"
+
+    sorted_rows = matched_rows.sort_values("_comparison_file_order")
+    ir_datasets = []
+    vibrational_datasets = []
+    for _, row in sorted_rows.iterrows():
+        ir_dataset = extract_ir_spectrum_dataset(row)
+        if ir_dataset is not None:
+            ir_datasets.append(ir_dataset)
+
+        vibrational_dataset = extract_vibrational_frequency_dataset(row)
+        if vibrational_dataset is not None:
+            vibrational_datasets.append(vibrational_dataset)
+
+    if len(ir_datasets) >= 2:
+        fig = go.Figure()
+        for dataset in ir_datasets:
+            fig.add_trace(
+                go.Scatter(
+                    x=dataset["frequencies"],
+                    y=dataset["intensities"],
+                    mode="lines",
+                    name=dataset["file"],
+                    hovertemplate=(
+                        f"File: {dataset['file']}<br>"
+                        f"Frequency: %{{x:.2f}} {dataset['frequency_unit']}<br>"
+                        "Intensity: %{y:.4g}<extra></extra>"
+                    ),
+                )
+            )
+
+        intensity_unit = next(
+            (dataset["intensity_unit"] for dataset in ir_datasets if dataset["intensity_unit"]),
+            None,
+        )
+        yaxis_title = "IR Intensity"
+        if intensity_unit:
+            yaxis_title = f"{yaxis_title} ({intensity_unit})"
+
+        frequency_unit = ir_datasets[0]["frequency_unit"]
+        fig.update_layout(
+            title=title,
+            xaxis_title=f"Frequency ({frequency_unit})",
+            yaxis_title=yaxis_title,
+            height=420,
+        )
+        summary_df = pd.DataFrame(
+            [build_spectrum_summary_row(dataset, "IR spectrum") for dataset in ir_datasets]
+        )
+        return fig, summary_df, "IR spectrum"
+
+    if vibrational_datasets:
+        fig = go.Figure()
+        summary_rows = []
+        for dataset in vibrational_datasets:
+            frequencies = dataset["frequencies"]
+            mode_types = np.where(frequencies < 0, "Imaginary", "Real")
+            customdata = [
+                [mode_number, mode_type]
+                for mode_number, mode_type in zip(
+                    np.arange(1, len(frequencies) + 1),
+                    mode_types,
+                )
+            ]
+            marker = {"size": 9}
+            if dataset["intensities"] is not None:
+                intensities = np.asarray(dataset["intensities"], dtype=float)
+                max_intensity = float(np.max(np.abs(intensities)))
+                if max_intensity > 0:
+                    marker["size"] = 7 + 12 * np.abs(intensities) / max_intensity
+
+            fig.add_trace(
+                go.Scatter(
+                    x=frequencies,
+                    y=[dataset["file"]] * len(frequencies),
+                    mode="markers",
+                    marker=marker,
+                    name=dataset["file"],
+                    customdata=customdata,
+                    hovertemplate=(
+                        "File: %{y}<br>"
+                        "Mode: %{customdata[0]}<br>"
+                        "Frequency: %{x:.2f} cm^-1<br>"
+                        "Type: %{customdata[1]}<extra></extra>"
+                    ),
+                )
+            )
+            summary_rows.append(
+                build_spectrum_summary_row(dataset, "Vibrational frequencies")
+            )
+
+        fig.add_vline(x=0, line_dash="dash", line_color="gray")
+        fig.update_layout(
+            title=title,
+            xaxis_title="Frequency (cm^-1)",
+            yaxis_title="File",
+            height=max(420, 110 * len(vibrational_datasets)),
+        )
+        return fig, pd.DataFrame(summary_rows), "Vibrational frequencies"
+
+    return None, pd.DataFrame(), "None"
+
+
 def normalize_element_symbol(raw_symbol: str) -> Optional[str]:
     """Normalize an XYZ atom symbol for display and radius lookup."""
     match = re.match(r"([A-Za-z]+)", str(raw_symbol).strip())
@@ -3110,19 +3467,90 @@ def main(data_paths: Optional[List[str]] = None):
                                 .sort_values("_comparison_molecule_label")
                                 .reset_index(drop=True)
                             )
-                            selected_option_index = st.selectbox(
-                                "Initial molecule",
-                                options=list(match_options.index),
-                                format_func=lambda option_index: match_options.loc[
-                                    option_index,
-                                    "_comparison_molecule_label",
-                                ],
-                                key="comparison_selected_molecule",
+                            comparison_match_ids = match_options[
+                                "_comparison_match_id"
+                            ].tolist()
+                            comparison_label_map = dict(
+                                zip(
+                                    match_options["_comparison_match_id"],
+                                    match_options["_comparison_molecule_label"],
+                                )
                             )
-                            selected_match_id = match_options.loc[
-                                selected_option_index,
-                                "_comparison_match_id",
-                            ]
+                            selected_match_index = sync_indexed_selection(
+                                st.session_state,
+                                comparison_match_ids,
+                                "comparison_selected_match_id",
+                                "comparison_selected_match_index",
+                            )
+                            selected_match_id = st.selectbox(
+                                "Initial molecule",
+                                options=comparison_match_ids,
+                                index=selected_match_index,
+                                format_func=lambda match_id: comparison_label_map.get(
+                                    match_id,
+                                    match_id,
+                                ),
+                                key="comparison_selected_match_id",
+                            )
+                            st.session_state["comparison_selected_match_index"] = (
+                                comparison_match_ids.index(selected_match_id)
+                            )
+
+                            def _go_comparison_prev():
+                                move_indexed_selection(
+                                    st.session_state,
+                                    comparison_match_ids,
+                                    "comparison_selected_match_id",
+                                    -1,
+                                    "comparison_selected_match_index",
+                                )
+
+                            def _go_comparison_next():
+                                move_indexed_selection(
+                                    st.session_state,
+                                    comparison_match_ids,
+                                    "comparison_selected_match_id",
+                                    1,
+                                    "comparison_selected_match_index",
+                                )
+
+                            nav_col_left, nav_col_center, nav_col_right = st.columns(
+                                [1, 2, 1]
+                            )
+                            with nav_col_left:
+                                if st.button(
+                                    "⬅️ Previous",
+                                    use_container_width=True,
+                                    disabled=(
+                                        st.session_state[
+                                            "comparison_selected_match_index"
+                                        ]
+                                        == 0
+                                    ),
+                                    on_click=_go_comparison_prev,
+                                    key="comparison_prev_button",
+                                ):
+                                    st.rerun()
+                            with nav_col_center:
+                                st.write(
+                                    f"{st.session_state['comparison_selected_match_index'] + 1} "
+                                    f"of {len(comparison_match_ids)}"
+                                )
+                            with nav_col_right:
+                                if st.button(
+                                    "Next ➡️",
+                                    use_container_width=True,
+                                    disabled=(
+                                        st.session_state[
+                                            "comparison_selected_match_index"
+                                        ]
+                                        == len(comparison_match_ids) - 1
+                                    ),
+                                    on_click=_go_comparison_next,
+                                    key="comparison_next_button",
+                                ):
+                                    st.rerun()
+
                             selected_rows = matched_rows[
                                 matched_rows["_comparison_match_id"] == selected_match_id
                             ]
@@ -3138,6 +3566,158 @@ def main(data_paths: Optional[List[str]] = None):
                                     hide_index=True,
                                 )
 
+                            st.markdown("---")
+                            st.subheader("Optimized Geometry Comparison")
+
+                            comparison_file_labels = selected_rows.sort_values(
+                                "_comparison_file_order"
+                            )["_comparison_file_label"].tolist()
+                            if (
+                                st.session_state.get("comparison_geometry_reference_file")
+                                not in comparison_file_labels
+                            ):
+                                st.session_state["comparison_geometry_reference_file"] = (
+                                    comparison_file_labels[0]
+                                )
+
+                            col_geom_ref, col_geom_style, col_geom_labels = st.columns(
+                                [2, 2, 1]
+                            )
+                            with col_geom_ref:
+                                geometry_reference_file = st.selectbox(
+                                    "Reference file",
+                                    options=comparison_file_labels,
+                                    key="comparison_geometry_reference_file",
+                                )
+                            geometry_view_style_options = {
+                                "Stick": "stick",
+                                "Ball and stick": "ball_and_stick",
+                                "Sphere": "sphere",
+                                "Wireframe": "wireframe",
+                            }
+                            with col_geom_style:
+                                selected_geometry_style = st.selectbox(
+                                    "3D style",
+                                    options=list(geometry_view_style_options.keys()),
+                                    key="comparison_geometry_view_style",
+                                )
+                            with col_geom_labels:
+                                show_geometry_labels = st.checkbox(
+                                    "Atom labels",
+                                    value=False,
+                                    key="comparison_geometry_view_labels",
+                                )
+                            geometry_view_style = geometry_view_style_options[
+                                selected_geometry_style
+                            ]
+
+                            sorted_selected_rows = selected_rows.sort_values(
+                                "_comparison_file_order"
+                            )
+                            selected_row_records = [
+                                row for _, row in sorted_selected_rows.iterrows()
+                            ]
+                            for start_index in range(0, len(selected_row_records), 2):
+                                row_chunk = selected_row_records[
+                                    start_index : start_index + 2
+                                ]
+                                geometry_columns = st.columns(len(row_chunk))
+                                for column, row in zip(geometry_columns, row_chunk):
+                                    with column:
+                                        st.markdown(
+                                            f"**{row['_comparison_file_label']}**"
+                                        )
+                                        unique_name = row.get("unique_name", None)
+                                        if not is_missing_scalar(unique_name):
+                                            st.write(str(unique_name))
+                                        render_molecule(
+                                            row.get("opt_xyz", None),
+                                            style=geometry_view_style,
+                                            label=f"{row['_comparison_file_label']} optimized",
+                                            show_labels=show_geometry_labels,
+                                        )
+
+                            optimized_geometry_comparison = (
+                                build_optimized_geometry_comparison(
+                                    selected_rows,
+                                    geometry_reference_file,
+                                    limit=10,
+                                )
+                            )
+                            if optimized_geometry_comparison["errors"]:
+                                with st.expander("Geometry comparison warnings", expanded=False):
+                                    for warning_text in optimized_geometry_comparison[
+                                        "errors"
+                                    ]:
+                                        st.warning(warning_text)
+
+                            geometry_metrics = optimized_geometry_comparison["metrics"]
+                            if not geometry_metrics.empty:
+                                st.dataframe(
+                                    geometry_metrics,
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
+
+                            col_bonds, col_angles = st.columns(2)
+                            with col_bonds:
+                                st.markdown("**Largest Bond Length Changes**")
+                                bond_changes = optimized_geometry_comparison[
+                                    "bond_changes"
+                                ]
+                                if bond_changes.empty:
+                                    st.info("No optimized bond length differences available.")
+                                else:
+                                    st.dataframe(
+                                        bond_changes,
+                                        use_container_width=True,
+                                        hide_index=True,
+                                    )
+                            with col_angles:
+                                st.markdown("**Largest Angle Changes**")
+                                angle_changes = optimized_geometry_comparison[
+                                    "angle_changes"
+                                ]
+                                if angle_changes.empty:
+                                    st.info("No optimized angle differences available.")
+                                else:
+                                    st.dataframe(
+                                        angle_changes,
+                                        use_container_width=True,
+                                        hide_index=True,
+                                    )
+
+                            st.markdown("---")
+                            st.subheader("IR Spectrum Comparison")
+                            spectrum_fig, spectrum_summary, spectrum_mode = (
+                                create_comparison_spectrum_plot(
+                                    selected_rows,
+                                    (
+                                        "Spectrum Comparison for "
+                                        f"{comparison_label_map[selected_match_id]}"
+                                    ),
+                                )
+                            )
+                            if spectrum_fig is None:
+                                st.info(
+                                    "No IR spectrum or vibrational frequency data "
+                                    "available for the selected comparison."
+                                )
+                            else:
+                                st.plotly_chart(spectrum_fig, use_container_width=True)
+                                if not spectrum_summary.empty:
+                                    st.dataframe(
+                                        spectrum_summary,
+                                        use_container_width=True,
+                                        hide_index=True,
+                                    )
+                                if spectrum_mode == "Vibrational frequencies":
+                                    st.info(
+                                        "Using vibrational frequencies because fewer "
+                                        "than two files have paired IR spectra."
+                                    )
+
+                            st.markdown("---")
                             show_unchanged_fields = st.checkbox(
                                 "Show unchanged fields",
                                 value=False,

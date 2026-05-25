@@ -15,10 +15,12 @@ from iqc_dashboard.app import (
     ENERGY_UNIT_KCAL,
     build_all_data_table,
     build_comparison_metric_table,
+    build_optimized_geometry_comparison,
     build_row_comparison_table,
     build_ligand_selector_df,
     calculate_reaction_gibbs,
     convert_energy_value,
+    create_comparison_spectrum_plot,
     energy_metadata_label,
     parquet_files_have_same_dimensions,
     parquet_files_have_same_schema,
@@ -372,6 +374,96 @@ class TestDataManager:
 
         assert comparison["matched_rows"].empty
         assert comparison["error"] == "Parquet files must have matching row and column counts."
+
+    def test_build_optimized_geometry_comparison(self):
+        """Test optimized geometry comparison reports structure deltas across files."""
+        matched_rows = pd.DataFrame(
+            {
+                "_comparison_file_label": ["method_a.parquet", "method_b.parquet"],
+                "_comparison_file_order": [0, 1],
+                "unique_name": ["mol_a", "mol_b"],
+                "opt_xyz": [
+                    (
+                        "4\nA\n"
+                        "C 0.0 0.0 0.0\n"
+                        "C 1.5 0.0 0.0\n"
+                        "C 2.5 1.0 0.0\n"
+                        "C 3.5 1.0 1.0"
+                    ),
+                    (
+                        "4\nB\n"
+                        "C 0.0 0.0 0.0\n"
+                        "C 1.4 0.0 0.0\n"
+                        "C 2.5 1.1 0.0\n"
+                        "C 3.6 1.2 1.0"
+                    ),
+                ],
+            }
+        )
+
+        result = build_optimized_geometry_comparison(
+            matched_rows,
+            "method_a.parquet",
+        )
+
+        assert result["errors"] == []
+        assert result["metrics"]["Comparison File"].tolist() == ["method_b.parquet"]
+        assert result["metrics"]["Heavy-atom RMSD (Å)"].iloc[0] > 0
+        assert not result["bond_changes"].empty
+        assert not result["angle_changes"].empty
+        assert {"Reference (Å)", "Comparison (Å)", "Δ (Å)"}.issubset(
+            result["bond_changes"].columns
+        )
+        assert {"Reference (°)", "Comparison (°)", "Δ (°)"}.issubset(
+            result["angle_changes"].columns
+        )
+
+    def test_create_comparison_spectrum_plot_prefers_ir_spectrum(self):
+        """Test comparison spectrum plot overlays paired IR spectra when available."""
+        matched_rows = pd.DataFrame(
+            {
+                "_comparison_file_label": ["method_a.parquet", "method_b.parquet"],
+                "_comparison_file_order": [0, 1],
+                "spectrum_frequencies": [[100, 200, 300], [100, 200, 300]],
+                "spectrum_intensities": [[0.1, 0.5, 0.2], [0.2, 0.4, 0.3]],
+                "spectrum_frequencies_units": ["cm^-1", "cm^-1"],
+                "spectrum_intensities_units": ["km/mol", "km/mol"],
+                "vibrational_frequencies_cm^-1": [[90, 190, 290], [95, 195, 295]],
+            }
+        )
+
+        fig, summary, mode = create_comparison_spectrum_plot(
+            matched_rows,
+            "Spectrum Comparison",
+        )
+
+        assert fig is not None
+        assert mode == "IR spectrum"
+        assert len(fig.data) == 2
+        assert summary["Data"].tolist() == ["IR spectrum", "IR spectrum"]
+
+    def test_create_comparison_spectrum_plot_falls_back_to_frequencies(self):
+        """Test comparison spectrum plot falls back to vibrational frequencies."""
+        matched_rows = pd.DataFrame(
+            {
+                "_comparison_file_label": ["method_a.parquet", "method_b.parquet"],
+                "_comparison_file_order": [0, 1],
+                "vibrational_frequencies_cm^-1": [[-25, 100, 200], [10, 110, 205]],
+            }
+        )
+
+        fig, summary, mode = create_comparison_spectrum_plot(
+            matched_rows,
+            "Frequency Comparison",
+        )
+
+        assert fig is not None
+        assert mode == "Vibrational frequencies"
+        assert len(fig.data) >= 2
+        assert summary["Data"].tolist() == [
+            "Vibrational frequencies",
+            "Vibrational frequencies",
+        ]
 
     def test_calculate_reaction_gibbs_kcal_conversion(self):
         """Test reaction Gibbs calculation converts eV to kcal/mol and computes ΔG."""
