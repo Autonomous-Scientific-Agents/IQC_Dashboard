@@ -348,7 +348,7 @@ python -m pip install -e ".[dev]"
 uv pip install -e ".[dev]"
 ```
 
-**Note:** The `[dev]` extra includes development tools like `pytest`, `black`, `ruff`, and `mypy`.
+**Note:** The `[dev]` extra includes development tools like `pytest`, `ruff`, and `mypy`.
 
 ### Running tests
 
@@ -375,7 +375,6 @@ pytest -v
 ### Code formatting
 
 ```bash
-black iqc_dashboard/
 ruff check iqc_dashboard/
 ```
 

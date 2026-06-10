@@ -46,7 +46,6 @@ dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "pytest-mock>=3.0.0",
-    "black>=23.0.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
 ]
@@ -65,10 +64,6 @@ include = ["iqc_dashboard*", "descriptor_kit*"]
 
 [tool.setuptools.package-data]
 iqc_dashboard = ["*.toml"]
-
-[tool.black]
-line-length = 100
-target-version = ['py39', 'py310', 'py311', 'py312']
 
 [tool.ruff]
 line-length = 100

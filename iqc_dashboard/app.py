@@ -3698,6 +3698,37 @@ def build_descriptor_hover_html(
 """
 
 
+def compact_xyz_for_browser(xyz_string: str, digits: int = 5) -> str:
+    """Trim XYZ coordinate precision for browser payloads without changing source data."""
+    if not xyz_string:
+        return ""
+
+    lines = str(xyz_string).splitlines()
+    if len(lines) < 3:
+        return str(xyz_string)
+
+    compact_lines = [lines[0].strip(), lines[1].strip()]
+    for line in lines[2:]:
+        parts = line.split()
+        if len(parts) < 4:
+            compact_lines.append(line.strip())
+            continue
+
+        try:
+            x_coord = float(parts[1])
+            y_coord = float(parts[2])
+            z_coord = float(parts[3])
+        except (TypeError, ValueError):
+            compact_lines.append(line.strip())
+            continue
+
+        compact_lines.append(
+            f"{parts[0]} {x_coord:.{digits}f} {y_coord:.{digits}f} {z_coord:.{digits}f}"
+        )
+
+    return "\n".join(compact_lines)
+
+
 def build_descriptor_delta_hover_html(
     descriptor_records: pd.DataFrame,
     title: str,
@@ -3707,7 +3738,7 @@ def build_descriptor_delta_hover_html(
 ) -> str:
     """Build a descriptor-vs-ΔG hover plot with a 3Dmol geometry panel."""
     points = []
-    for point_index, (_, row) in enumerate(descriptor_records.reset_index(drop=True).iterrows()):
+    for _, row in descriptor_records.reset_index(drop=True).iterrows():
         descriptor_value = row.get("value", None)
         delta_g = row.get("deltaG", None)
         if not is_finite_descriptor_value(descriptor_value) or not is_finite_descriptor_value(
@@ -3717,12 +3748,12 @@ def build_descriptor_delta_hover_html(
 
         points.append(
             {
-                "index": point_index,
+                "index": len(points),
                 "value": float(descriptor_value),
                 "deltaG": float(delta_g),
                 "name": str(row.get("unique_name", "")),
                 "smiles": str(row.get("smiles", "")),
-                "xyz": str(row.get("xyz", "")),
+                "xyz": compact_xyz_for_browser(str(row.get("xyz", ""))),
                 "variant": str(row.get("variant", "")),
                 "atomSummary": str(row.get("atom_summary", "")),
                 "reaction": str(row.get("reaction_id", "")),

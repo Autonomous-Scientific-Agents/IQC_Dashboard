@@ -17,6 +17,7 @@ from iqc_dashboard.app import (
     build_descriptor_reaction_pairs,
     build_descriptor_value_options,
     build_selected_descriptor_dataframe,
+    compact_xyz_for_browser,
     extract_descriptor_keyword_options,
 )
 
@@ -258,3 +259,66 @@ def test_descriptor_delta_hover_html_uses_descriptor_x_and_delta_g_y():
     assert '"deltaG": -5.25' in html
     assert "x: group.map((point) => point.value)" in html
     assert "y: group.map((point) => point.deltaG)" in html
+
+
+def test_descriptor_delta_hover_html_reindexes_after_skipping_nonfinite_rows():
+    """Skipped rows must not leave stale indexes in Plotly hover callbacks."""
+    records = pd.DataFrame(
+        [
+            {
+                "descriptor_id": "prod_ni_o1",
+                "descriptor": "Product: Ni O1",
+                "role": "product",
+                "variant": "Type_I",
+                "value": float("nan"),
+                "deltaG": -5.25,
+                "unique_name": "skipped_product",
+                "smiles": "C",
+                "xyz": read_example_xyz("type_I_product.xyz"),
+                "atom_summary": "descriptor_kit",
+                "reaction_id": "10",
+                "reactant_name": "reactant_a",
+                "product_name": "skipped_product",
+            },
+            {
+                "descriptor_id": "prod_ni_o1",
+                "descriptor": "Product: Ni O1",
+                "role": "product",
+                "variant": "Type_I",
+                "value": 1.2345,
+                "deltaG": -5.25,
+                "unique_name": "product_a",
+                "smiles": "C",
+                "xyz": read_example_xyz("type_I_product.xyz"),
+                "atom_summary": "descriptor_kit",
+                "reaction_id": "10",
+                "reactant_name": "reactant_a",
+                "product_name": "product_a",
+            },
+        ]
+    )
+
+    html = build_descriptor_delta_hover_html(
+        records,
+        "Product: Ni O1",
+        "Å",
+        "kcal/mol",
+        "ΔG",
+    )
+
+    assert '"index": 0' in html
+    assert "skipped_product" not in html
+
+
+def test_compact_xyz_for_browser_reduces_coordinate_precision():
+    """Browser payloads should not carry unnecessary XYZ decimal precision."""
+    xyz = "2\ncomment\nC 1.123456789 -2.987654321 3.111111111\nH 0 0 0\n"
+
+    compact = compact_xyz_for_browser(xyz, digits=3)
+
+    assert compact.splitlines() == [
+        "2",
+        "comment",
+        "C 1.123 -2.988 3.111",
+        "H 0.000 0.000 0.000",
+    ]
