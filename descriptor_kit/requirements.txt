@@ -1,0 +1,5 @@
+numpy>=1.23
+scipy>=1.9
+rdkit>=2023.3
+morfeus-ml>=0.8.0
+pandas>=1.5
