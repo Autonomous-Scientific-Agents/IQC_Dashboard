@@ -18,6 +18,8 @@ import difflib
 import html
 import hashlib
 import json
+import base64
+import zlib
 
 EV_TO_KCAL_MOL = 23.0605
 ENERGY_UNIT_KCAL = "kcal/mol"
@@ -58,41 +60,157 @@ COMPARISON_SUMMARY_COLUMNS = (
     "opt_time",
     "number_of_imaginary",
 )
-DESCRIPTOR_DEFINITIONS = (
-    {
-        "id": "reactant_n_ni_c_angles",
-        "label": "N-Ni-C Angles",
-        "role": "reactant",
-        "unit": "deg",
-    },
-    {
-        "id": "product_o1_ni_c_beta_angle",
-        "label": "O1-Ni-C_beta Angle",
-        "role": "product",
-        "unit": "deg",
-    },
-    {
-        "id": "product_mean_n_ni_o1_angle",
-        "label": "Mean N-Ni-O1 Angle",
-        "role": "product",
-        "unit": "deg",
-    },
-    {
-        "id": "product_ni_n_distance_difference",
-        "label": "|Ni-N_A - Ni-N_B|",
-        "role": "product",
-        "unit": "angstrom",
-    },
-    {
-        "id": "product_ni_bpy_plane_distance",
-        "label": "Ni Distance From Bpy Plane",
-        "role": "product",
-        "unit": "angstrom",
-    },
-)
+try:
+    from descriptor_kit import (
+        DESCRIPTOR_KEYS as KIT_DESCRIPTOR_KEYS,
+        PRODUCT_KEYS as KIT_PRODUCT_KEYS,
+        REACTANT_KEYS as KIT_REACTANT_KEYS,
+        TDELTA_KEYS as KIT_TDELTA_KEYS,
+        compute_descriptors as kit_compute_descriptors,
+        compute_tdelta as kit_compute_tdelta,
+    )
+    from descriptor_kit.core import geometry as kit_geometry
+    from descriptor_kit.core import topology as kit_topology
+    from descriptor_kit.descriptors import product as kit_product_descriptors
+    from descriptor_kit.descriptors import reactant as kit_reactant_descriptors
+
+    KIT_REACTANT_FUNCTIONS = {
+        function.__name__: function for function in kit_reactant_descriptors.ALL
+    }
+    KIT_PRODUCT_FUNCTIONS = {
+        function.__name__: function for function in kit_product_descriptors.ALL
+    }
+
+    DESCRIPTOR_KIT_AVAILABLE = True
+    DESCRIPTOR_KIT_IMPORT_ERROR = ""
+except Exception as e:  # noqa: BLE001 - show actionable runtime dependency errors in UI
+    KIT_REACTANT_KEYS = []
+    KIT_PRODUCT_KEYS = []
+    KIT_DESCRIPTOR_KEYS = []
+    KIT_TDELTA_KEYS = []
+    kit_compute_descriptors = None
+    kit_compute_tdelta = None
+    kit_geometry = None
+    kit_topology = None
+    KIT_REACTANT_FUNCTIONS = {}
+    KIT_PRODUCT_FUNCTIONS = {}
+    DESCRIPTOR_KIT_AVAILABLE = False
+    DESCRIPTOR_KIT_IMPORT_ERROR = str(e)
+
+
+def descriptor_family_for_key(descriptor_key: str) -> str:
+    """Return the descriptor family for a descriptor_kit key."""
+    if descriptor_key.startswith("reac_"):
+        return "reactant"
+    if descriptor_key.startswith("prod_"):
+        return "product"
+    if descriptor_key.startswith("tdelta_"):
+        return "pair"
+    return "unknown"
+
+
+def descriptor_family_label(family: str) -> str:
+    """Return a display label for a descriptor family."""
+    return {
+        "reactant": "Reactant",
+        "product": "Product",
+        "pair": "Regioisomer Δ",
+    }.get(family, family.title())
+
+
+def descriptor_label_from_key(descriptor_key: str) -> str:
+    """Build a readable label from a descriptor_kit key."""
+    prefix_map = {
+        "reac_": "Reactant",
+        "prod_": "Product",
+        "tdelta_": "Δ(Type I-II)",
+    }
+    label_prefix = ""
+    core = descriptor_key
+    for prefix, display_prefix in prefix_map.items():
+        if descriptor_key.startswith(prefix):
+            label_prefix = display_prefix
+            core = descriptor_key.removeprefix(prefix)
+            break
+
+    replacements = {
+        "ni": "Ni",
+        "bpy": "bpy",
+        "o1": "O1",
+        "Cb": "Cβ",
+        "Ca": "Cα",
+        "ccarb": "Ccarb",
+        "cc": "C-C",
+        "co": "C-O",
+        "dih": "Dihedral",
+        "vbur": "%Vbur",
+        "sigma": "σ",
+        "dsigma": "Δσ",
+        "tdelta": "Δ",
+        "abs": "Abs",
+        "dni": "ΔNi",
+        "dB5": "ΔB5",
+        "dL": "ΔL",
+        "dvbur": "Δ%Vbur",
+        "dvol": "ΔVolume",
+        "rms": "RMS",
+        "tau4": "τ4",
+    }
+    tokens = [replacements.get(token, token) for token in core.split("_")]
+    label = " ".join(tokens)
+    return f"{label_prefix}: {label}" if label_prefix else label
+
+
+def descriptor_unit_for_key(descriptor_key: str) -> str:
+    """Infer a display unit from a descriptor_kit key."""
+    lower_key = descriptor_key.lower()
+    if "sigma" in lower_key or "tau4" in lower_key:
+        return "dimensionless"
+    if "vbur" in lower_key:
+        return "percent"
+    angular_tokens = (
+        "angle",
+        "bite",
+        "bend",
+        "dih",
+        "dihedral",
+        "orientation",
+        "tilt",
+        "n_ni_c",
+        "n_ni_o",
+    )
+    if any(token in lower_key for token in angular_tokens):
+        return "deg"
+    if "vol" in lower_key:
+        return "angstrom^3"
+    if "cremer_pople_q" in lower_key:
+        return "angstrom"
+    return "angstrom"
+
+
+def build_descriptor_definitions() -> Tuple[dict, ...]:
+    """Build descriptor metadata from descriptor_kit registries."""
+    descriptor_keys = list(KIT_DESCRIPTOR_KEYS) + list(KIT_TDELTA_KEYS)
+    return tuple(
+        {
+            "id": descriptor_key,
+            "label": descriptor_label_from_key(descriptor_key),
+            "role": descriptor_family_for_key(descriptor_key),
+            "family": descriptor_family_for_key(descriptor_key),
+            "family_label": descriptor_family_label(descriptor_family_for_key(descriptor_key)),
+            "unit": descriptor_unit_for_key(descriptor_key),
+        }
+        for descriptor_key in descriptor_keys
+    )
+
+
+DESCRIPTOR_DEFINITIONS = build_descriptor_definitions()
 DESCRIPTOR_UNIT_LABELS = {
     "deg": "degrees",
     "angstrom": "Å",
+    "angstrom^3": "Å³",
+    "dimensionless": "unitless",
+    "percent": "%",
 }
 
 # Import 3D visualization libraries - will be checked when needed
@@ -2610,16 +2728,13 @@ def extract_descriptor_keyword_options(df: pd.DataFrame, role: str) -> List[str]
     return sorted(keywords, key=lambda keyword: keyword.lower())
 
 
-def build_descriptor_dataframe(
-    df: pd.DataFrame,
-    reactant_keywords: Optional[List[str]] = None,
-    product_keywords: Optional[List[str]] = None,
-) -> pd.DataFrame:
-    """Calculate all supported descriptor records for matching reactants and products."""
-    columns = [
+def descriptor_record_columns() -> List[str]:
+    """Return the descriptor dataframe schema."""
+    return [
         "descriptor_id",
         "descriptor",
         "role",
+        "family",
         "variant",
         "value",
         "unit",
@@ -2629,33 +2744,737 @@ def build_descriptor_dataframe(
         "bipyridine",
         "alkyne",
         "atom_summary",
+        "reaction_id",
+        "reactant_name",
+        "product_name",
+        "source_json_row",
+        "ligand_pair",
+        "stereo_type",
+        "insertion_type",
     ]
+
+
+def is_finite_descriptor_value(value) -> bool:
+    """Return True when a descriptor value can be plotted."""
+    if is_missing_scalar(value):
+        return False
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return False
+    return bool(np.isfinite(numeric_value))
+
+
+def normalize_descriptor_role(value) -> Optional[str]:
+    """Normalize reactant/product role labels."""
+    if is_missing_scalar(value):
+        return None
+    text = str(value).strip().lower()
+    if "reactant" in text:
+        return "reactant"
+    if "product" in text:
+        return "product"
+    return None
+
+
+def normalize_insertion_type(value) -> str:
+    """Normalize Type_I/Type_II labels for regioisomer pairing."""
+    if is_missing_scalar(value):
+        return ""
+    text = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    if text in {"type_i", "type_1", "i", "1"}:
+        return "type_i"
+    if text in {"type_ii", "type_2", "ii", "2"}:
+        return "type_ii"
+    return text
+
+
+def get_descriptor_pair_value(
+    reactant_row: pd.Series,
+    product_row: pd.Series,
+    column: str,
+    default: str = "",
+) -> str:
+    """Return the first non-missing pair metadata value."""
+    for row in (reactant_row, product_row):
+        value = row.get(column, None)
+        if not is_missing_scalar(value):
+            return str(value)
+    return default
+
+
+def infer_descriptor_pair_key(row: pd.Series) -> str:
+    """Build a fallback pair key for non-JSON reactant/product rows."""
+    unique_name = str(row.get("unique_name", ""))
+    parsed_name = parse_unique_name(unique_name)
+    key_parts = [
+        parsed_name.get("bipyridine"),
+        parsed_name.get("alkyne"),
+        row.get("ligand_pair", ""),
+        row.get("stereo_type", ""),
+        row.get("insertion_type", ""),
+    ]
+    return "|".join(str(part) for part in key_parts if not is_missing_scalar(part))
+
+
+def build_descriptor_reaction_pairs(
+    df: pd.DataFrame,
+    reactant_keywords: Optional[List[str]] = None,
+    product_keywords: Optional[List[str]] = None,
+    max_pairs: Optional[int] = None,
+) -> List[dict]:
+    """Build paired reactant/product entries for descriptor_kit."""
     if df.empty or "unique_name" not in df.columns:
-        return pd.DataFrame(columns=columns)
+        return []
 
     reactant_keywords = reactant_keywords or []
     product_keywords = product_keywords or []
+    work = df.reset_index(drop=True).copy()
+    work["_descriptor_order"] = np.arange(len(work))
+    work["_descriptor_role"] = work.apply(
+        lambda row: normalize_descriptor_role(row.get("reaction_role", None))
+        or parse_unique_name(str(row.get("unique_name", ""))).get("role"),
+        axis=1,
+    )
+
+    if "source_json_row" in work.columns:
+        work["_descriptor_pair_key"] = work["source_json_row"].astype(str)
+    else:
+        work["_descriptor_pair_key"] = work.apply(infer_descriptor_pair_key, axis=1)
+
+    pairs = []
+    sorted_work = work.sort_values("_descriptor_order", kind="stable")
+    for pair_key, pair_rows in sorted_work.groupby("_descriptor_pair_key", sort=False):
+        reactant_rows = pair_rows[pair_rows["_descriptor_role"] == "reactant"]
+        product_rows = pair_rows[pair_rows["_descriptor_role"] == "product"]
+        if reactant_rows.empty or product_rows.empty:
+            continue
+
+        reactant_row = reactant_rows.iloc[0]
+        product_row = product_rows.iloc[0]
+        if not row_matches_descriptor_keywords(reactant_row, reactant_keywords):
+            continue
+        if not row_matches_descriptor_keywords(product_row, product_keywords):
+            continue
+
+        reactant_xyz = get_preferred_xyz(reactant_row)
+        product_xyz = get_preferred_xyz(product_row)
+        if reactant_xyz is None or product_xyz is None:
+            continue
+
+        reactant_name = str(reactant_row.get("unique_name", ""))
+        product_name = str(product_row.get("unique_name", ""))
+        parsed_name = parse_unique_name(reactant_name)
+        source_json_row = get_descriptor_pair_value(
+            reactant_row,
+            product_row,
+            "source_json_row",
+            str(pair_key),
+        )
+        ligand_pair = get_descriptor_pair_value(reactant_row, product_row, "ligand_pair")
+        stereo_type = get_descriptor_pair_value(reactant_row, product_row, "stereo_type")
+        insertion_type = get_descriptor_pair_value(
+            reactant_row,
+            product_row,
+            "insertion_type",
+        )
+
+        pairs.append(
+            {
+                "reaction_id": str(source_json_row),
+                "source_json_row": source_json_row,
+                "ligand_pair": ligand_pair,
+                "stereo_type": stereo_type,
+                "insertion_type": insertion_type,
+                "insertion_type_normalized": normalize_insertion_type(insertion_type),
+                "bipyridine": parsed_name.get("bipyridine"),
+                "alkyne": parsed_name.get("alkyne"),
+                "reactant_row": reactant_row,
+                "product_row": product_row,
+                "reactant_xyz": reactant_xyz,
+                "product_xyz": product_xyz,
+                "reactant_name": reactant_name,
+                "product_name": product_name,
+            }
+        )
+
+        if max_pairs is not None and len(pairs) >= max_pairs:
+            break
+
+    return pairs
+
+
+def build_descriptor_kit_record(
+    descriptor_key: str,
+    value: float,
+    pair_entry: dict,
+    row: pd.Series,
+    xyz_string: str,
+    variant: str,
+    atom_summary: str,
+) -> Optional[dict]:
+    """Build one descriptor_kit record for plotting and tables."""
+    descriptor = get_descriptor_definition(descriptor_key)
+    if descriptor is None:
+        return None
+
+    return {
+        "descriptor_id": descriptor_key,
+        "descriptor": descriptor["label"],
+        "role": descriptor["role"],
+        "family": descriptor["family"],
+        "variant": variant,
+        "value": float(value),
+        "unit": descriptor["unit"],
+        "unique_name": str(row.get("unique_name", "")),
+        "smiles": get_preferred_smiles(row),
+        "xyz": xyz_string,
+        "bipyridine": pair_entry.get("bipyridine"),
+        "alkyne": pair_entry.get("alkyne"),
+        "atom_summary": atom_summary,
+        "reaction_id": pair_entry.get("reaction_id", ""),
+        "reactant_name": pair_entry.get("reactant_name", ""),
+        "product_name": pair_entry.get("product_name", ""),
+        "source_json_row": pair_entry.get("source_json_row", ""),
+        "ligand_pair": pair_entry.get("ligand_pair", ""),
+        "stereo_type": pair_entry.get("stereo_type", ""),
+        "insertion_type": pair_entry.get("insertion_type", ""),
+    }
+
+
+def build_descriptor_value_options(
+    descriptor_records: pd.DataFrame,
+    unit_label: str,
+) -> pd.DataFrame:
+    """Build selectable options for individual descriptor values."""
+    option_columns = [
+        "_descriptor_value_id",
+        "_descriptor_value_label",
+        "_descriptor_value_position",
+    ]
+    if descriptor_records.empty:
+        return pd.DataFrame(columns=option_columns)
+
+    options = []
+    for position, (_, record) in enumerate(descriptor_records.reset_index(drop=True).iterrows()):
+        descriptor_id = str(record.get("descriptor_id", "descriptor"))
+        role_label = descriptor_family_label(str(record.get("role", "unknown")))
+        reaction_id = str(record.get("reaction_id", ""))
+        value = format_optional_number(record.get("value"))
+        molecule_label = shorten_comparison_text(str(record.get("unique_name", "")), 72)
+        label = (
+            f"{position + 1}: {value} {unit_label} | "
+            f"{role_label} | reaction {reaction_id} | {molecule_label}"
+        )
+        options.append(
+            {
+                "_descriptor_value_id": f"{descriptor_id}:{position}",
+                "_descriptor_value_label": label,
+                "_descriptor_value_position": position,
+            }
+        )
+
+    return pd.DataFrame(options, columns=option_columns)
+
+
+def build_single_reaction_descriptor_records(pair_entry: dict) -> Tuple[List[dict], dict]:
+    """Compute descriptor_kit single-reaction records for one paired row."""
+    if kit_compute_descriptors is None:
+        return [], {}
+
+    diagnostics = []
+    try:
+        descriptor_values = kit_compute_descriptors(
+            pair_entry["reactant_xyz"],
+            pair_entry["product_xyz"],
+            diagnostics=diagnostics,
+        )
+    except Exception:
+        return [], {}
+
     records = []
-
-    for _, row in df.iterrows():
-        unique_name = row.get("unique_name", None)
-        if is_missing_scalar(unique_name):
+    diagnostic_count = len(diagnostics)
+    for descriptor_key, value in descriptor_values.items():
+        if not is_finite_descriptor_value(value):
             continue
 
-        role = parse_unique_name(str(unique_name)).get("role")
-        if role not in {"reactant", "product"}:
-            continue
-
+        role = descriptor_family_for_key(descriptor_key)
         if role == "reactant":
-            if not row_matches_descriptor_keywords(row, reactant_keywords):
-                continue
-        elif not row_matches_descriptor_keywords(row, product_keywords):
+            row = pair_entry["reactant_row"]
+            xyz_string = pair_entry["reactant_xyz"]
+        else:
+            row = pair_entry["product_row"]
+            xyz_string = pair_entry["product_xyz"]
+
+        variant = pair_entry.get("insertion_type") or descriptor_family_label(role)
+        atom_summary = (
+            f"descriptor_kit; reaction={pair_entry.get('reaction_id', '')}; "
+            f"failures={diagnostic_count}"
+        )
+        record = build_descriptor_kit_record(
+            descriptor_key,
+            float(value),
+            pair_entry,
+            row,
+            xyz_string,
+            variant,
+            atom_summary,
+        )
+        if record is not None:
+            records.append(record)
+
+    return records, descriptor_values
+
+
+def descriptor_tdelta_group_key(pair_entry: dict) -> Tuple[str, str]:
+    """Return grouping key for Type_I/Type_II regioisomer descriptor deltas."""
+    ligand_pair = pair_entry.get("ligand_pair") or "|".join(
+        str(value)
+        for value in (pair_entry.get("bipyridine"), pair_entry.get("alkyne"))
+        if value
+    )
+    return str(ligand_pair), str(pair_entry.get("stereo_type", ""))
+
+
+def build_tdelta_descriptor_records(computed_pairs: List[dict]) -> List[dict]:
+    """Build pair-level descriptor records from Type_I/Type_II descriptor results."""
+    if kit_compute_tdelta is None:
+        return []
+
+    grouped_pairs: Dict[Tuple[str, str], Dict[str, dict]] = {}
+    for computed_pair in computed_pairs:
+        insertion_type = computed_pair["pair_entry"].get("insertion_type_normalized")
+        if insertion_type not in {"type_i", "type_ii"}:
+            continue
+        group_key = descriptor_tdelta_group_key(computed_pair["pair_entry"])
+        grouped_pairs.setdefault(group_key, {})[insertion_type] = computed_pair
+
+    records = []
+    for pair_group in grouped_pairs.values():
+        type_i = pair_group.get("type_i")
+        type_ii = pair_group.get("type_ii")
+        if type_i is None or type_ii is None:
             continue
 
-        for descriptor in DESCRIPTOR_DEFINITIONS:
-            if descriptor["role"] != role:
+        tdelta_values = kit_compute_tdelta(
+            type_i["descriptor_values"],
+            type_ii["descriptor_values"],
+        )
+        pair_entry = type_i["pair_entry"].copy()
+        pair_entry["reaction_id"] = (
+            f"{type_i['pair_entry'].get('reaction_id', '')} - "
+            f"{type_ii['pair_entry'].get('reaction_id', '')}"
+        )
+        pair_entry["reactant_name"] = (
+            f"{type_i['pair_entry'].get('reactant_name', '')} | "
+            f"{type_ii['pair_entry'].get('reactant_name', '')}"
+        )
+        pair_entry["product_name"] = (
+            f"{type_i['pair_entry'].get('product_name', '')} | "
+            f"{type_ii['pair_entry'].get('product_name', '')}"
+        )
+        product_row = type_i["pair_entry"]["product_row"]
+        atom_summary = (
+            "Regioisomer delta; Type_I product geometry shown; "
+            f"Type_II product={type_ii['pair_entry'].get('product_name', '')}"
+        )
+
+        for descriptor_key, value in tdelta_values.items():
+            if not is_finite_descriptor_value(value):
                 continue
-            records.extend(calculate_descriptor_records_for_row(row, descriptor))
+            record = build_descriptor_kit_record(
+                descriptor_key,
+                float(value),
+                pair_entry,
+                product_row,
+                type_i["pair_entry"]["product_xyz"],
+                "Type_I - Type_II",
+                atom_summary,
+            )
+            if record is not None:
+                record["unique_name"] = (
+                    f"{type_i['pair_entry'].get('product_name', '')} | "
+                    f"{type_ii['pair_entry'].get('product_name', '')}"
+                )
+                records.append(record)
+
+    return records
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def build_descriptor_dataframe(
+    df: pd.DataFrame,
+    reactant_keywords: Optional[List[str]] = None,
+    product_keywords: Optional[List[str]] = None,
+    max_pairs: Optional[int] = None,
+) -> pd.DataFrame:
+    """Calculate descriptor_kit records for paired reactant/product rows."""
+    columns = descriptor_record_columns()
+    if not DESCRIPTOR_KIT_AVAILABLE or df.empty or "unique_name" not in df.columns:
+        return pd.DataFrame(columns=columns)
+
+    records = []
+    computed_pairs = []
+    pair_entries = build_descriptor_reaction_pairs(
+        df,
+        reactant_keywords=reactant_keywords,
+        product_keywords=product_keywords,
+        max_pairs=max_pairs,
+    )
+    for pair_entry in pair_entries:
+        pair_records, descriptor_values = build_single_reaction_descriptor_records(
+            pair_entry,
+        )
+        if descriptor_values:
+            computed_pairs.append(
+                {
+                    "pair_entry": pair_entry,
+                    "descriptor_values": descriptor_values,
+                }
+            )
+        records.extend(pair_records)
+
+    records.extend(build_tdelta_descriptor_records(computed_pairs))
+
+    return pd.DataFrame(records, columns=columns)
+
+
+def descriptor_delta_record_columns() -> List[str]:
+    """Return descriptor records with reaction energy columns for scatter plots."""
+    return descriptor_record_columns() + ["deltaG", "deltaG_unit"]
+
+
+def build_reaction_delta_lookup(
+    df: pd.DataFrame,
+    energy_unit: str,
+) -> Dict[str, Dict[Any, float]]:
+    """Build lookup maps for reaction ΔG values from the supported reaction table."""
+    lookup: Dict[str, Dict[Any, float]] = {"source_json_row": {}, "names": {}}
+    try:
+        delta_df = calculate_reaction_table(df, energy_unit=energy_unit)
+    except Exception:
+        return lookup
+
+    if delta_df.empty or "deltaG" not in delta_df.columns:
+        return lookup
+
+    for _, reaction_row in delta_df.iterrows():
+        delta_g = reaction_row.get("deltaG", None)
+        if not is_finite_descriptor_value(delta_g):
+            continue
+
+        delta_value = float(delta_g)
+        source_json_row = reaction_row.get("source_json_row", None)
+        if not is_missing_scalar(source_json_row):
+            lookup["source_json_row"][str(source_json_row)] = delta_value
+
+        reactant_name = reaction_row.get("unique_name_reactant", None)
+        product_name = reaction_row.get("unique_name_product", None)
+        if not is_missing_scalar(reactant_name) and not is_missing_scalar(product_name):
+            lookup["names"][(str(reactant_name), str(product_name))] = delta_value
+
+    return lookup
+
+
+def get_minimum_co2_gibbs_ev(df: pd.DataFrame) -> Optional[float]:
+    """Return the lowest CO2 Gibbs energy for row-level ΔG calculations."""
+    if df.empty or "G_eV" not in df.columns or "unique_name" not in df.columns:
+        return None
+
+    roles = df["unique_name"].astype(str).apply(
+        lambda unique_name: parse_unique_name(unique_name).get("role")
+    )
+    co2_values = pd.to_numeric(df.loc[roles == "co2", "G_eV"], errors="coerce")
+    co2_values = co2_values.dropna()
+    if co2_values.empty:
+        return None
+
+    return float(co2_values.min())
+
+
+def calculate_pair_delta_g(
+    pair_entry: dict,
+    energy_unit: str,
+    delta_lookup: Dict[str, Dict[Any, float]],
+    co2_gibbs_ev: Optional[float],
+) -> Optional[float]:
+    """Return the ΔG value associated with one paired descriptor entry."""
+    for row_key in ("reactant_row", "product_row"):
+        row = pair_entry.get(row_key)
+        if row is None or "reaction_gibbs_kcal" not in row:
+            continue
+
+        delta_g = convert_reaction_gibbs_kcal(
+            row.get("reaction_gibbs_kcal", None),
+            energy_unit,
+        )
+        if delta_g is not None and np.isfinite(delta_g):
+            return float(delta_g)
+
+    if co2_gibbs_ev is not None:
+        reactant_row = pair_entry.get("reactant_row")
+        product_row = pair_entry.get("product_row")
+        if reactant_row is not None and product_row is not None:
+            reactant_g = reactant_row.get("G_eV", None)
+            product_g = product_row.get("G_eV", None)
+            if not is_missing_scalar(reactant_g) and not is_missing_scalar(product_g):
+                delta_g_ev = float(product_g) - (float(reactant_g) + co2_gibbs_ev)
+                return float(delta_g_ev * energy_conversion_factor(energy_unit))
+
+    source_json_row = pair_entry.get("source_json_row", None)
+    if not is_missing_scalar(source_json_row):
+        source_delta = delta_lookup["source_json_row"].get(str(source_json_row))
+        if source_delta is not None:
+            return source_delta
+
+    name_delta = delta_lookup["names"].get(
+        (
+            str(pair_entry.get("reactant_name", "")),
+            str(pair_entry.get("product_name", "")),
+        )
+    )
+    if name_delta is not None:
+        return name_delta
+
+    return None
+
+
+def selected_descriptor_function(descriptor_id: str, role: str):
+    """Return the descriptor_kit function for one reactant or product descriptor."""
+    if role == "reactant":
+        return KIT_REACTANT_FUNCTIONS.get(descriptor_id)
+    if role == "product":
+        return KIT_PRODUCT_FUNCTIONS.get(descriptor_id)
+    return None
+
+
+def compute_selected_single_descriptor_value(
+    descriptor_id: str,
+    role: str,
+    xyz_string: str,
+) -> Tuple[Optional[float], str]:
+    """Compute one descriptor_kit value for one species geometry."""
+    if kit_geometry is None or kit_topology is None:
+        return None, "descriptor_kit geometry/topology modules are unavailable"
+
+    descriptor_function = selected_descriptor_function(descriptor_id, role)
+    if descriptor_function is None:
+        return None, f"{descriptor_id} is not a {role} descriptor"
+
+    try:
+        geometry = kit_geometry.build_geom(*kit_geometry.parse_xyz(xyz_string))
+        if role == "reactant":
+            species = kit_topology.identify_reactant(geometry)
+        else:
+            species = kit_topology.identify_product(geometry)
+        descriptor_values = descriptor_function(species)
+        value = descriptor_values.get(descriptor_id, None)
+    except Exception as exc:  # noqa: BLE001 - invalid descriptor geometries are skipped
+        return None, f"{type(exc).__name__}: {exc}"
+
+    if not is_finite_descriptor_value(value):
+        return None, "descriptor returned NaN"
+
+    return float(value), ""
+
+
+def tdelta_source_product_descriptor(descriptor_id: str) -> str:
+    """Return the product descriptor used by a tdelta descriptor."""
+    return f"prod_{descriptor_id.removeprefix('tdelta_')}"
+
+
+def build_selected_single_descriptor_records(
+    pair_entries: List[dict],
+    descriptor_id: str,
+    role: str,
+    energy_unit: str,
+    delta_lookup: Dict[str, Dict[Any, float]],
+    co2_gibbs_ev: Optional[float],
+) -> List[dict]:
+    """Build records for one reactant or product descriptor across all pairs."""
+    records = []
+    row_key = "reactant_row" if role == "reactant" else "product_row"
+    xyz_key = "reactant_xyz" if role == "reactant" else "product_xyz"
+
+    for pair_entry in pair_entries:
+        delta_g = calculate_pair_delta_g(
+            pair_entry,
+            energy_unit,
+            delta_lookup,
+            co2_gibbs_ev,
+        )
+        if not is_finite_descriptor_value(delta_g):
+            continue
+
+        value, _error = compute_selected_single_descriptor_value(
+            descriptor_id,
+            role,
+            pair_entry[xyz_key],
+        )
+        if value is None:
+            continue
+
+        atom_summary = f"descriptor_kit; {descriptor_family_label(role)} geometry"
+        record = build_descriptor_kit_record(
+            descriptor_id,
+            value,
+            pair_entry,
+            pair_entry[row_key],
+            pair_entry[xyz_key],
+            pair_entry.get("insertion_type") or descriptor_family_label(role),
+            atom_summary,
+        )
+        if record is None:
+            continue
+
+        record["deltaG"] = float(delta_g)
+        record["deltaG_unit"] = energy_unit
+        records.append(record)
+
+    return records
+
+
+def build_selected_tdelta_descriptor_records(
+    pair_entries: List[dict],
+    descriptor_id: str,
+    energy_unit: str,
+    delta_lookup: Dict[str, Dict[Any, float]],
+    co2_gibbs_ev: Optional[float],
+) -> List[dict]:
+    """Build records for one Type_I - Type_II product descriptor delta."""
+    source_descriptor_id = tdelta_source_product_descriptor(descriptor_id)
+    if source_descriptor_id not in KIT_PRODUCT_FUNCTIONS:
+        return []
+
+    grouped_pairs: Dict[Tuple[str, str], Dict[str, dict]] = {}
+    for pair_entry in pair_entries:
+        insertion_type = pair_entry.get("insertion_type_normalized")
+        if insertion_type not in {"type_i", "type_ii"}:
+            continue
+
+        delta_g = calculate_pair_delta_g(
+            pair_entry,
+            energy_unit,
+            delta_lookup,
+            co2_gibbs_ev,
+        )
+        if not is_finite_descriptor_value(delta_g):
+            continue
+
+        value, _error = compute_selected_single_descriptor_value(
+            source_descriptor_id,
+            "product",
+            pair_entry["product_xyz"],
+        )
+        if value is None:
+            continue
+
+        group_key = descriptor_tdelta_group_key(pair_entry)
+        grouped_pairs.setdefault(group_key, {})[insertion_type] = {
+            "pair_entry": pair_entry,
+            "source_value": value,
+            "deltaG": float(delta_g),
+        }
+
+    records = []
+    for pair_group in grouped_pairs.values():
+        type_i = pair_group.get("type_i")
+        type_ii = pair_group.get("type_ii")
+        if type_i is None or type_ii is None:
+            continue
+
+        pair_entry = type_i["pair_entry"].copy()
+        pair_entry["reaction_id"] = (
+            f"{type_i['pair_entry'].get('reaction_id', '')} - "
+            f"{type_ii['pair_entry'].get('reaction_id', '')}"
+        )
+        pair_entry["reactant_name"] = (
+            f"{type_i['pair_entry'].get('reactant_name', '')} | "
+            f"{type_ii['pair_entry'].get('reactant_name', '')}"
+        )
+        pair_entry["product_name"] = (
+            f"{type_i['pair_entry'].get('product_name', '')} | "
+            f"{type_ii['pair_entry'].get('product_name', '')}"
+        )
+        product_row = type_i["pair_entry"]["product_row"]
+        atom_summary = (
+            "Regioisomer descriptor delta; Type_I product geometry shown; "
+            f"Type_II product={type_ii['pair_entry'].get('product_name', '')}"
+        )
+
+        record = build_descriptor_kit_record(
+            descriptor_id,
+            type_i["source_value"] - type_ii["source_value"],
+            pair_entry,
+            product_row,
+            type_i["pair_entry"]["product_xyz"],
+            "Type_I - Type_II",
+            atom_summary,
+        )
+        if record is None:
+            continue
+
+        record["unique_name"] = (
+            f"{type_i['pair_entry'].get('product_name', '')} | "
+            f"{type_ii['pair_entry'].get('product_name', '')}"
+        )
+        record["deltaG"] = type_i["deltaG"] - type_ii["deltaG"]
+        record["deltaG_unit"] = energy_unit
+        records.append(record)
+
+    return records
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def build_selected_descriptor_dataframe(
+    df: pd.DataFrame,
+    descriptor_id: str,
+    energy_unit: str = ENERGY_UNIT_KCAL,
+    reactant_keywords: Optional[List[str]] = None,
+    product_keywords: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """Calculate one descriptor across every applicable reaction pair."""
+    columns = descriptor_delta_record_columns()
+    if (
+        not DESCRIPTOR_KIT_AVAILABLE
+        or df.empty
+        or "unique_name" not in df.columns
+        or get_descriptor_definition(descriptor_id) is None
+    ):
+        return pd.DataFrame(columns=columns)
+
+    pair_entries = build_descriptor_reaction_pairs(
+        df,
+        reactant_keywords=reactant_keywords,
+        product_keywords=product_keywords,
+        max_pairs=None,
+    )
+    if not pair_entries:
+        return pd.DataFrame(columns=columns)
+
+    delta_lookup = build_reaction_delta_lookup(df, energy_unit)
+    co2_gibbs_ev = get_minimum_co2_gibbs_ev(df)
+    role = descriptor_family_for_key(descriptor_id)
+
+    if role in {"reactant", "product"}:
+        records = build_selected_single_descriptor_records(
+            pair_entries,
+            descriptor_id,
+            role,
+            energy_unit,
+            delta_lookup,
+            co2_gibbs_ev,
+        )
+    elif role == "pair":
+        records = build_selected_tdelta_descriptor_records(
+            pair_entries,
+            descriptor_id,
+            energy_unit,
+            delta_lookup,
+            co2_gibbs_ev,
+        )
+    else:
+        records = []
 
     return pd.DataFrame(records, columns=columns)
 
@@ -2679,6 +3498,9 @@ def build_descriptor_hover_html(
                 "variant": str(row.get("variant", "")),
                 "descriptor": str(row.get("descriptor", "")),
                 "atomSummary": str(row.get("atom_summary", "")),
+                "reaction": str(row.get("reaction_id", "")),
+                "reactant": str(row.get("reactant_name", "")),
+                "product": str(row.get("product_name", "")),
             }
         )
 
@@ -2757,7 +3579,8 @@ def build_descriptor_hover_html(
       <div class="preview-meta">
         <div><strong>SMILES:</strong> <span id="preview-smiles"></span></div>
         <div><strong>Value:</strong> <span id="preview-value"></span></div>
-        <div><strong>Atoms:</strong> <span id="preview-atoms"></span></div>
+        <div><strong>Reaction:</strong> <span id="preview-reaction"></span></div>
+        <div><strong>Details:</strong> <span id="preview-atoms"></span></div>
       </div>
       <div id="descriptor-viewer">
         <div class="viewer-message">Hover a plotted molecule to load its geometry.</div>
@@ -2787,6 +3610,7 @@ def build_descriptor_hover_html(
       document.getElementById("preview-smiles").textContent = point.smiles || "N/A";
       document.getElementById("preview-value").textContent =
         `${{point.value.toFixed(4)}} {escaped_unit} (${{point.variant || "value"}})`;
+      document.getElementById("preview-reaction").textContent = point.reaction || "N/A";
       document.getElementById("preview-atoms").textContent = point.atomSummary || "N/A";
 
       if (!point.xyz) {{
@@ -2828,14 +3652,16 @@ def build_descriptor_hover_html(
           point.name,
           point.smiles,
           point.variant,
-          point.atomSummary
+          point.atomSummary,
+          point.reaction
         ]),
         hovertemplate:
           "<b>%{{customdata[1]}}</b><br>" +
           "SMILES: %{{customdata[2]}}<br>" +
+          "Reaction: %{{customdata[5]}}<br>" +
           "Variant: %{{customdata[3]}}<br>" +
           "Value: %{{y:.4f}} {escaped_unit}<br>" +
-          "Atoms: %{{customdata[4]}}<extra></extra>"
+          "Details: %{{customdata[4]}}<extra></extra>"
       }});
     }}
 
@@ -2849,6 +3675,280 @@ def build_descriptor_hover_html(
         hovermode: "closest",
         margin: {{ l: 68, r: 24, t: 54, b: 52 }},
         legend: {{ orientation: "h", y: -0.16 }},
+        paper_bgcolor: "white",
+        plot_bgcolor: "white"
+      }},
+      {{ responsive: true, displayModeBar: true }}
+    );
+
+    plotEl.on("plotly_hover", (eventData) => {{
+      if (!eventData.points || !eventData.points.length) {{
+        return;
+      }}
+      const pointIndex = eventData.points[0].customdata[0];
+      renderPoint(points[pointIndex]);
+    }});
+
+    if (points.length > 0) {{
+      renderPoint(points[0]);
+    }}
+  </script>
+</body>
+</html>
+"""
+
+
+def build_descriptor_delta_hover_html(
+    descriptor_records: pd.DataFrame,
+    title: str,
+    descriptor_unit_label: str,
+    energy_unit_label: str,
+    y_axis_label: str,
+) -> str:
+    """Build a descriptor-vs-ΔG hover plot with a 3Dmol geometry panel."""
+    points = []
+    for point_index, (_, row) in enumerate(descriptor_records.reset_index(drop=True).iterrows()):
+        descriptor_value = row.get("value", None)
+        delta_g = row.get("deltaG", None)
+        if not is_finite_descriptor_value(descriptor_value) or not is_finite_descriptor_value(
+            delta_g
+        ):
+            continue
+
+        points.append(
+            {
+                "index": point_index,
+                "value": float(descriptor_value),
+                "deltaG": float(delta_g),
+                "name": str(row.get("unique_name", "")),
+                "smiles": str(row.get("smiles", "")),
+                "xyz": str(row.get("xyz", "")),
+                "variant": str(row.get("variant", "")),
+                "atomSummary": str(row.get("atom_summary", "")),
+                "reaction": str(row.get("reaction_id", "")),
+                "role": descriptor_family_label(str(row.get("role", ""))),
+            }
+        )
+
+    points_json = json.dumps(points).replace("</", "<\\/")
+    pako_script = ""
+    if len(points_json) > 1_000_000:
+        compressed_payload = base64.b64encode(
+            zlib.compress(points_json.encode("utf-8"), level=6)
+        ).decode("ascii")
+        pako_script = (
+            '<script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js">'
+            "</script>"
+        )
+        points_script = f"""
+    function decodeCompressedPoints(payload) {{
+      if (!window.pako) {{
+        return [];
+      }}
+      const binary = atob(payload);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) {{
+        bytes[index] = binary.charCodeAt(index);
+      }}
+      return JSON.parse(window.pako.inflate(bytes, {{ to: "string" }}));
+    }}
+    const points = decodeCompressedPoints("{compressed_payload}");
+"""
+    else:
+        points_script = f"    const points = {points_json};"
+    title_json = json.dumps(title)
+    descriptor_unit_json = json.dumps(descriptor_unit_label)
+    energy_unit_json = json.dumps(energy_unit_label)
+    y_axis_label_json = json.dumps(y_axis_label)
+    x_axis_title_json = json.dumps(f"{title} ({descriptor_unit_label})")
+
+    return f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <script src="https://3Dmol.org/build/3Dmol-min.js"></script>
+  {pako_script}
+  <style>
+    body {{
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #17202a;
+    }}
+    .descriptor-shell {{
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
+      gap: 14px;
+      min-height: 560px;
+    }}
+    #descriptor-plot {{
+      min-height: 560px;
+      border: 1px solid #d7dde5;
+      border-radius: 8px;
+    }}
+    .preview-panel {{
+      border: 1px solid #d7dde5;
+      border-radius: 8px;
+      padding: 12px;
+      min-width: 0;
+    }}
+    .preview-title {{
+      font-weight: 650;
+      font-size: 15px;
+      margin-bottom: 6px;
+      overflow-wrap: anywhere;
+    }}
+    .preview-meta {{
+      font-size: 12px;
+      color: #4f5b66;
+      line-height: 1.45;
+      margin-bottom: 10px;
+      overflow-wrap: anywhere;
+    }}
+    #descriptor-viewer {{
+      height: 390px;
+      width: 100%;
+      background: #ffffff;
+      border: 1px solid #e3e8ef;
+      border-radius: 6px;
+      position: relative;
+    }}
+    .viewer-message {{
+      padding: 14px;
+      color: #5d6875;
+      font-size: 13px;
+    }}
+    @media (max-width: 760px) {{
+      .descriptor-shell {{
+        grid-template-columns: 1fr;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="descriptor-shell">
+    <div id="descriptor-plot"></div>
+    <div class="preview-panel">
+      <div class="preview-title" id="preview-name">Hover a point</div>
+      <div class="preview-meta">
+        <div><strong>Species:</strong> <span id="preview-role"></span></div>
+        <div><strong>SMILES:</strong> <span id="preview-smiles"></span></div>
+        <div><strong>Descriptor:</strong> <span id="preview-value"></span></div>
+        <div><strong>ΔG:</strong> <span id="preview-delta"></span></div>
+        <div><strong>Reaction:</strong> <span id="preview-reaction"></span></div>
+        <div><strong>Details:</strong> <span id="preview-atoms"></span></div>
+      </div>
+      <div id="descriptor-viewer">
+        <div class="viewer-message">Hover a plotted molecule to load its geometry.</div>
+      </div>
+    </div>
+  </div>
+  <script>
+{points_script}
+    const title = {title_json};
+    const descriptorUnit = {descriptor_unit_json};
+    const energyUnit = {energy_unit_json};
+    const yAxisLabel = {y_axis_label_json};
+    const xAxisTitle = {x_axis_title_json};
+    const plotEl = document.getElementById("descriptor-plot");
+    const viewerEl = document.getElementById("descriptor-viewer");
+    let viewer = null;
+
+    function groupByVariant(items) {{
+      const groups = new Map();
+      for (const point of items) {{
+        const key = point.variant || point.role || "Value";
+        if (!groups.has(key)) {{
+          groups.set(key, []);
+        }}
+        groups.get(key).push(point);
+      }}
+      return groups;
+    }}
+
+    function formatValue(value, digits = 4) {{
+      if (!Number.isFinite(value)) {{
+        return "N/A";
+      }}
+      return value.toFixed(digits);
+    }}
+
+    function renderPoint(point) {{
+      document.getElementById("preview-name").textContent =
+        point.name || "Unnamed molecule";
+      document.getElementById("preview-role").textContent = point.role || "N/A";
+      document.getElementById("preview-smiles").textContent = point.smiles || "N/A";
+      document.getElementById("preview-value").textContent =
+        `${{formatValue(point.value)}} ${{descriptorUnit}}`;
+      document.getElementById("preview-delta").textContent =
+        `${{formatValue(point.deltaG)}} ${{energyUnit}}`;
+      document.getElementById("preview-reaction").textContent = point.reaction || "N/A";
+      document.getElementById("preview-atoms").textContent = point.atomSummary || "N/A";
+
+      if (!point.xyz) {{
+        viewerEl.innerHTML = '<div class="viewer-message">No XYZ geometry available.</div>';
+        viewer = null;
+        return;
+      }}
+
+      if (!window.$3Dmol) {{
+        viewerEl.innerHTML =
+          '<div class="viewer-message">3Dmol.js is unavailable, but hover data is loaded.</div>';
+        viewer = null;
+        return;
+      }}
+
+      viewerEl.innerHTML = "";
+      viewer = window.$3Dmol.createViewer(viewerEl, {{ backgroundColor: "white" }});
+      viewer.addModel(point.xyz, "xyz");
+      viewer.setStyle({{}}, {{ stick: {{ radius: 0.16 }}, sphere: {{ scale: 0.24 }} }});
+      viewer.zoomTo();
+      viewer.render();
+    }}
+
+    const traces = [];
+    for (const [variant, group] of groupByVariant(points).entries()) {{
+      traces.push({{
+        x: group.map((point) => point.value),
+        y: group.map((point) => point.deltaG),
+        mode: "markers",
+        type: "scattergl",
+        name: variant,
+        marker: {{
+          size: 8,
+          opacity: 0.78,
+          line: {{ width: 0.5, color: "#243447" }}
+        }},
+        customdata: group.map((point) => [
+          point.index,
+          point.name,
+          point.smiles,
+          point.variant,
+          point.atomSummary,
+          point.reaction,
+          point.role
+        ]),
+        hovertemplate:
+          "<b>%{{customdata[1]}}</b><br>" +
+          "Species: %{{customdata[6]}}<br>" +
+          "SMILES: %{{customdata[2]}}<br>" +
+          "Reaction: %{{customdata[5]}}<br>" +
+          "Descriptor: %{{x:.4f}} " + descriptorUnit + "<br>" +
+          yAxisLabel + ": %{{y:.4f}} " + energyUnit + "<extra></extra>"
+      }});
+    }}
+
+    Plotly.newPlot(
+      plotEl,
+      traces,
+      {{
+        title: title,
+        xaxis: {{ title: xAxisTitle, zeroline: false }},
+        yaxis: {{ title: `${{yAxisLabel}} (${{energyUnit}})`, zeroline: false }},
+        hovermode: "closest",
+        margin: {{ l: 74, r: 24, t: 54, b: 62 }},
+        legend: {{ orientation: "h", y: -0.18 }},
         paper_bgcolor: "white",
         plot_bgcolor: "white"
       }},
@@ -3368,13 +4468,16 @@ def build_precomputed_reaction_row(
         "G_product": product_row.get("source_gibbs", np.nan),
         "G_CO2": np.nan,
         "deltaG": delta_g,
-        "reaction_gibbs_kcal": float(reaction_gibbs_kcal),
-        "unique_name_reactant": reactant_row.get("unique_name", ""),
-        "unique_name_product": product_row.get("unique_name", ""),
-        "stereo_type": first_non_missing_value(reaction_rows.get("stereo_type", pd.Series())),
-        "insertion_type": first_non_missing_value(
-            reaction_rows.get("insertion_type", pd.Series())
-        ),
+            "reaction_gibbs_kcal": float(reaction_gibbs_kcal),
+            "unique_name_reactant": reactant_row.get("unique_name", ""),
+            "unique_name_product": product_row.get("unique_name", ""),
+            "source_json_row": first_non_missing_value(
+                reaction_rows.get("source_json_row", pd.Series())
+            ),
+            "stereo_type": first_non_missing_value(reaction_rows.get("stereo_type", pd.Series())),
+            "insertion_type": first_non_missing_value(
+                reaction_rows.get("insertion_type", pd.Series())
+            ),
         "reaction_data_source": "precomputed_json",
     }
 
@@ -3478,6 +4581,7 @@ def calculate_precomputed_reaction_gibbs(
             "reaction_gibbs_kcal": delta["_reaction_gibbs_kcal_numeric"].astype(float),
             "unique_name_reactant": delta["unique_name_reactant"],
             "unique_name_product": delta["unique_name_product"],
+            "source_json_row": delta["source_json_row"],
             "stereo_type": (
                 delta["stereo_type"] if "stereo_type" in delta.columns else None
             ),
@@ -4570,126 +5674,141 @@ def main(data_paths: Optional[List[str]] = None):
             st.info("Try adjusting filters or uploading reaction-like Ni complex data.")
         elif "unique_name" not in descriptor_source_df.columns:
             st.error("Dataset does not contain 'unique_name' column.")
+        elif not DESCRIPTOR_KIT_AVAILABLE:
+            st.error("descriptor_kit could not be loaded.")
+            st.info(
+                "Install the descriptor dependencies with "
+                "`uv pip install --python .venv/bin/python -r descriptor_kit/requirements.txt`."
+            )
+            if DESCRIPTOR_KIT_IMPORT_ERROR:
+                st.code(DESCRIPTOR_KIT_IMPORT_ERROR)
         else:
-            reactant_keyword_options = extract_descriptor_keyword_options(
-                descriptor_source_df,
-                "reactant",
-            )
-            product_keyword_options = extract_descriptor_keyword_options(
-                descriptor_source_df,
-                "product",
-            )
-
-            control_col1, control_col2, control_col3 = st.columns([2, 2, 1])
-            with control_col1:
-                selected_reactant_keywords = st.multiselect(
-                    "Reactant keyword filters",
-                    options=reactant_keyword_options,
-                    key="descriptor_reactant_keywords",
-                    help=(
-                        "Reactant rows must contain every selected keyword in "
-                        "unique_name, formula, or SMILES."
-                    ),
-                )
-            with control_col2:
-                selected_product_keywords = st.multiselect(
-                    "Product keyword filters",
-                    options=product_keyword_options,
-                    key="descriptor_product_keywords",
-                    help=(
-                        "Product rows must contain every selected keyword in "
-                        "unique_name, formula, or SMILES."
-                    ),
-                )
-            with control_col3:
-                max_descriptor_points = st.number_input(
-                    "Max plot points",
-                    min_value=25,
-                    max_value=5000,
-                    value=500,
-                    step=25,
-                    help="Maximum XYZ-bearing points embedded in each hover plot.",
-                )
-
-            with st.spinner("Calculating descriptors..."):
-                descriptor_df = build_descriptor_dataframe(
-                    descriptor_source_df,
-                    reactant_keywords=selected_reactant_keywords,
-                    product_keywords=selected_product_keywords,
-                )
-
-            if descriptor_df.empty:
-                st.warning(
-                    "No descriptor values could be calculated for the current filters."
-                )
-                st.info(
-                    "Descriptor calculation requires Ni, two nearby N atoms, and "
-                    "descriptor-specific C/O atoms in initial or optimized XYZ data."
-                )
+            descriptor_options = [descriptor["id"] for descriptor in DESCRIPTOR_DEFINITIONS]
+            if not descriptor_options:
+                st.warning("No descriptor definitions are available.")
             else:
-                metric_col1, metric_col2, metric_col3 = st.columns(3)
-                with metric_col1:
-                    st.metric(
-                        "Descriptor Points",
-                        int(len(descriptor_df)),
+                descriptor_label_map = {
+                    descriptor["id"]: (
+                        f"{descriptor_family_label(descriptor['role'])} - "
+                        f"{descriptor['label']} ({descriptor['id']})"
                     )
-                with metric_col2:
-                    st.metric(
-                        "Reactant Molecules",
-                        int(
-                            descriptor_df[descriptor_df["role"] == "reactant"][
-                                "unique_name"
-                            ].nunique()
-                        ),
-                    )
-                with metric_col3:
-                    st.metric(
-                        "Product Molecules",
-                        int(
-                            descriptor_df[descriptor_df["role"] == "product"][
-                                "unique_name"
-                            ].nunique()
-                        ),
-                    )
+                    for descriptor in DESCRIPTOR_DEFINITIONS
+                }
+                if st.session_state.get("descriptor_id_select") not in descriptor_options:
+                    st.session_state["descriptor_id_select"] = descriptor_options[0]
 
-                st.markdown("---")
-                st.subheader("Descriptor Plots")
-                descriptor_tabs = st.tabs(
-                    [descriptor["label"] for descriptor in DESCRIPTOR_DEFINITIONS]
+                selected_descriptor_id = st.selectbox(
+                    "Descriptor",
+                    options=descriptor_options,
+                    format_func=lambda descriptor_id: descriptor_label_map.get(
+                        descriptor_id,
+                        descriptor_id,
+                    ),
+                    key="descriptor_id_select",
                 )
-                for descriptor_tab, descriptor in zip(
-                    descriptor_tabs,
-                    DESCRIPTOR_DEFINITIONS,
-                ):
-                    with descriptor_tab:
-                        descriptor_records = descriptor_df[
-                            descriptor_df["descriptor_id"] == descriptor["id"]
-                        ].copy()
-                        if descriptor_records.empty:
-                            st.info(
-                                f"No {descriptor['label']} values for the current filters."
-                            )
-                            continue
+                descriptor = get_descriptor_definition(selected_descriptor_id)
 
+                selected_reactant_keywords: List[str] = []
+                selected_product_keywords: List[str] = []
+                with st.expander("Optional keyword filters", expanded=False):
+                    reactant_keyword_options = extract_descriptor_keyword_options(
+                        descriptor_source_df,
+                        "reactant",
+                    )
+                    product_keyword_options = extract_descriptor_keyword_options(
+                        descriptor_source_df,
+                        "product",
+                    )
+                    filter_col1, filter_col2 = st.columns(2)
+                    with filter_col1:
+                        selected_reactant_keywords = st.multiselect(
+                            "Reactant keywords",
+                            options=reactant_keyword_options,
+                            key="descriptor_reactant_keywords",
+                        )
+                    with filter_col2:
+                        selected_product_keywords = st.multiselect(
+                            "Product keywords",
+                            options=product_keyword_options,
+                            key="descriptor_product_keywords",
+                        )
+
+                if descriptor is None:
+                    st.info("No values for the selected descriptor.")
+                else:
+                    with st.spinner(f"Calculating {descriptor['label']}..."):
+                        descriptor_records = build_selected_descriptor_dataframe(
+                            descriptor_source_df,
+                            selected_descriptor_id,
+                            energy_unit=energy_unit,
+                            reactant_keywords=selected_reactant_keywords,
+                            product_keywords=selected_product_keywords,
+                        )
+
+                    if descriptor_records.empty:
+                        st.warning(
+                            "No descriptor values could be calculated for the "
+                            "selected descriptor."
+                        )
+                        st.info(
+                            "The selected descriptor needs paired reactant/product "
+                            "XYZ geometries, a valid reaction ΔG value, and a "
+                            "descriptor_kit-recognized topology."
+                        )
+                    else:
                         descriptor_records = descriptor_records.sort_values(
-                            ["variant", "unique_name", "value"],
+                            ["variant", "reaction_id", "value", "deltaG"],
                             kind="stable",
                         ).reset_index(drop=True)
-                        plotted_records = descriptor_records.head(
-                            int(max_descriptor_points)
+                        descriptor_values_numeric = pd.to_numeric(
+                            descriptor_records["value"],
+                            errors="coerce",
                         )
-                        if len(plotted_records) < len(descriptor_records):
-                            st.info(
-                                f"Showing {len(plotted_records):,} of "
-                                f"{len(descriptor_records):,} descriptor points. "
-                                "Increase Max plot points to embed more geometries."
+                        delta_values_numeric = pd.to_numeric(
+                            descriptor_records["deltaG"],
+                            errors="coerce",
+                        )
+                        descriptor_unit_label = format_descriptor_unit(
+                            descriptor["unit"]
+                        )
+                        y_axis_label = (
+                            "ΔΔG Type I - Type II"
+                            if descriptor["role"] == "pair"
+                            else "ΔG"
+                        )
+
+                        metric_col1, metric_col2, metric_col3, metric_col4 = (
+                            st.columns(4)
+                        )
+                        with metric_col1:
+                            st.metric(
+                                "Data Points Included",
+                                f"{int(descriptor_values_numeric.count()):,}",
+                            )
+                        with metric_col2:
+                            st.metric(
+                                f"Median ({descriptor_unit_label})",
+                                format_optional_number(
+                                    descriptor_values_numeric.median()
+                                ),
+                            )
+                        with metric_col3:
+                            st.metric(
+                                f"Min {y_axis_label} ({energy_unit})",
+                                format_optional_number(delta_values_numeric.min()),
+                            )
+                        with metric_col4:
+                            st.metric(
+                                f"Max {y_axis_label} ({energy_unit})",
+                                format_optional_number(delta_values_numeric.max()),
                             )
 
-                        unit_label = format_descriptor_unit(descriptor["unit"])
-                        descriptor_html = build_descriptor_hover_html(
-                            plotted_records,
+                        descriptor_html = build_descriptor_delta_hover_html(
+                            descriptor_records,
                             descriptor["label"],
-                            unit_label,
+                            descriptor_unit_label,
+                            energy_unit,
+                            y_axis_label,
                         )
                         components.html(
                             descriptor_html,
@@ -4697,36 +5816,45 @@ def main(data_paths: Optional[List[str]] = None):
                             scrolling=False,
                         )
 
-                        table_display = descriptor_records[
-                            [
-                                "unique_name",
-                                "smiles",
-                                "variant",
-                                "value",
-                                "unit",
-                                "bipyridine",
-                                "alkyne",
-                                "atom_summary",
+                        with st.expander("Data points", expanded=False):
+                            table_display = descriptor_records[
+                                [
+                                    "reaction_id",
+                                    "role",
+                                    "unique_name",
+                                    "smiles",
+                                    "variant",
+                                    "value",
+                                    "deltaG",
+                                    "ligand_pair",
+                                    "stereo_type",
+                                    "insertion_type",
+                                    "reactant_name",
+                                    "product_name",
+                                ]
+                            ].copy()
+                            table_display["role"] = table_display["role"].map(
+                                descriptor_family_label
+                            )
+                            table_display.columns = [
+                                "Reaction",
+                                "Species",
+                                "Molecule",
+                                "SMILES",
+                                "Variant",
+                                f"{descriptor['label']} ({descriptor_unit_label})",
+                                f"{y_axis_label} ({energy_unit})",
+                                "Ligand Pair",
+                                "Stereo",
+                                "Insertion",
+                                "Reactant",
+                                "Product",
                             ]
-                        ].copy()
-                        table_display["unit"] = table_display["unit"].map(
-                            format_descriptor_unit
-                        )
-                        table_display.columns = [
-                            "Molecule",
-                            "SMILES",
-                            "Variant",
-                            "Value",
-                            "Unit",
-                            "Bipyridine",
-                            "Alkyne",
-                            "Inferred Atoms",
-                        ]
-                        st.dataframe(
-                            table_display,
-                            width="stretch",
-                            hide_index=True,
-                        )
+                            st.dataframe(
+                                table_display,
+                                width="stretch",
+                                hide_index=True,
+                            )
 
     # ========================================================================
     # Comparison Tab: File-aware row comparison

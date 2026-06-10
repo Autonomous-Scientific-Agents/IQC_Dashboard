@@ -98,23 +98,9 @@ class TestDataManager:
 
     def test_load_data_paths_expands_reaction_json(self, temp_dir):
         """Test reaction-level JSON expands into descriptor-ready molecule rows."""
-        reactant_xyz = """5
-
-Ni 0.0 0.0 0.0
-N -2.0 0.0 0.0
-N 2.0 0.0 0.0
-C 0.0 2.0 0.0
-O 0.0 -2.0 0.0
-"""
-        product_xyz = """6
-
-Ni 0.0 0.0 0.2
-N -2.0 0.0 0.0
-N 2.4 0.0 0.0
-O 0.0 2.0 0.2
-C 0.0 -2.0 0.2
-C -2.0 1.3 0.0
-"""
+        example_dir = Path(__file__).parent.parent / "descriptor_kit" / "example"
+        reactant_xyz = (example_dir / "type_I_reactant.xyz").read_text(encoding="utf-8")
+        product_xyz = (example_dir / "type_I_product.xyz").read_text(encoding="utf-8")
         json_path = Path(temp_dir) / "reaction_data.json"
         pd.DataFrame(
             {
@@ -141,7 +127,7 @@ C -2.0 1.3 0.0
             "bipy-aaeaaeaa_f-C2H2-e_product_product_conf_Type_I_intermediate_0",
         ]
         assert loaded_df["opt_xyz"].tolist() == [reactant_xyz, product_xyz]
-        assert loaded_df["number_of_atoms"].tolist() == [5, 6]
+        assert loaded_df["number_of_atoms"].tolist() == [29, 32]
 
         descriptor_df = build_descriptor_dataframe(loaded_df)
         assert not descriptor_df.empty

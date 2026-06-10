@@ -1,111 +1,173 @@
-"""Tests for molecular descriptor calculations."""
+"""Tests for descriptor_kit-backed molecular descriptor calculations."""
 
 import sys
 from pathlib import Path
 
-import pytest
 import pandas as pd
+import pytest
 
 # Add parent directory to path to import the module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from descriptor_kit import compute_descriptors, compute_tdelta
+
 from iqc_dashboard.app import (
+    build_descriptor_delta_hover_html,
     build_descriptor_dataframe,
+    build_descriptor_reaction_pairs,
+    build_descriptor_value_options,
+    build_selected_descriptor_dataframe,
     extract_descriptor_keyword_options,
 )
 
 
-def test_build_descriptor_dataframe_calculates_reactant_n_ni_c_angles():
-    """Reactant descriptor returns both N-Ni-C angles."""
-    reactant_xyz = """8
-reactant
-Ni 0.0 0.0 0.0
-N -2.0 0.0 0.0
-N 2.0 0.0 0.0
-C 0.0 2.0 0.0
-C -2.0 1.3 0.0
-C -3.2 0.0 0.0
-C 2.0 1.3 0.0
-C 3.2 0.0 0.0
-"""
-    df = pd.DataFrame(
-        {
-            "unique_name": ["bipy-test_alkyne-test_reactant_conf1"],
-            "initial_smiles": ["reactant-smiles"],
-            "opt_smiles": ["reactant-opt-smiles"],
-            "opt_xyz": [reactant_xyz],
-        }
-    )
+EXAMPLE_DIR = Path(__file__).parent.parent / "descriptor_kit" / "example"
+
+
+def read_example_xyz(name: str) -> str:
+    """Read one bundled descriptor_kit example XYZ file."""
+    return (EXAMPLE_DIR / name).read_text(encoding="utf-8")
+
+
+def build_example_reaction_df() -> pd.DataFrame:
+    """Build Type_I and Type_II paired reaction rows from descriptor_kit examples."""
+    rows = []
+    for source_json_row, insertion_type in [(0, "Type_I"), (1, "Type_II")]:
+        for reaction_role in ("reactant", "product"):
+            xyz_name = f"type_{'I' if insertion_type == 'Type_I' else 'II'}_{reaction_role}.xyz"
+            rows.append(
+                {
+                    "source_json_row": source_json_row,
+                    "reaction_role": reaction_role,
+                    "unique_name": (
+                        f"bipy-alpha_alkyne-one_{reaction_role}_"
+                        f"intermediate_{insertion_type}_{source_json_row}"
+                    ),
+                    "ligand_pair": "bipy-alpha_alkyne-one",
+                    "stereo_type": "S",
+                    "insertion_type": insertion_type,
+                    "reaction_gibbs_kcal": -5.0 + source_json_row,
+                    "opt_xyz": read_example_xyz(xyz_name),
+                    "initial_smiles": f"{reaction_role}-smiles",
+                    "opt_smiles": f"{reaction_role}-opt-smiles",
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_build_descriptor_dataframe_uses_descriptor_kit_single_reaction():
+    """Descriptor dataframe uses descriptor_kit values for paired rows."""
+    df = build_example_reaction_df().iloc[:2].copy()
 
     descriptors = build_descriptor_dataframe(df)
-    angle_records = descriptors[
-        descriptors["descriptor_id"] == "reactant_n_ni_c_angles"
-    ].sort_values("variant")
-
-    assert angle_records["variant"].tolist() == ["N_A-Ni-C_beta", "N_B-Ni-C_beta"]
-    assert angle_records["value"].tolist() == pytest.approx([90.0, 90.0])
-    assert angle_records["smiles"].tolist() == [
-        "reactant-opt-smiles",
-        "reactant-opt-smiles",
-    ]
-
-
-def test_build_descriptor_dataframe_calculates_product_descriptors():
-    """Product descriptors identify N donors, O1, C_beta, and the bpy plane."""
-    product_xyz = """9
-product
-Ni 0.0 0.0 0.2
-N -2.0 0.0 0.0
-N 2.4 0.0 0.0
-O 0.0 2.0 0.2
-C 0.0 -2.0 0.2
-C -2.0 1.3 0.0
-C -3.2 0.0 0.0
-C 2.4 1.3 0.0
-C 3.6 0.0 0.0
-"""
-    df = pd.DataFrame(
-        {
-            "unique_name": ["bipy-test_alkyne-test_product_conf1"],
-            "initial_smiles": ["product-smiles"],
-            "opt_xyz": [product_xyz],
-        }
+    expected = compute_descriptors(
+        read_example_xyz("type_I_reactant.xyz"),
+        read_example_xyz("type_I_product.xyz"),
     )
 
-    descriptors = build_descriptor_dataframe(df)
     values = {
         descriptor_id: descriptor_rows["value"].iloc[0]
         for descriptor_id, descriptor_rows in descriptors.groupby("descriptor_id")
     }
 
-    assert values["product_o1_ni_c_beta_angle"] == pytest.approx(180.0)
-    assert values["product_mean_n_ni_o1_angle"] == pytest.approx(90.0)
-    assert values["product_ni_n_distance_difference"] == pytest.approx(
-        ((2.4**2 + 0.2**2) ** 0.5) - ((2.0**2 + 0.2**2) ** 0.5)
+    assert values["reac_cc_triple_len"] == pytest.approx(expected["reac_cc_triple_len"])
+    assert values["prod_o_ni_bite_Cb"] == pytest.approx(expected["prod_o_ni_bite_Cb"])
+    assert set(descriptors["role"]) >= {"reactant", "product"}
+    assert "reactant-opt-smiles" in descriptors["smiles"].tolist()
+    assert "product-opt-smiles" in descriptors["smiles"].tolist()
+
+
+def test_build_selected_descriptor_dataframe_uses_product_delta_g_plot_data():
+    """Selected product descriptor records plot descriptor value against ΔG."""
+    df = build_example_reaction_df().iloc[:2].copy()
+
+    descriptors = build_selected_descriptor_dataframe(df, "prod_ni_o1")
+    expected = compute_descriptors(
+        read_example_xyz("type_I_reactant.xyz"),
+        read_example_xyz("type_I_product.xyz"),
     )
-    assert values["product_ni_bpy_plane_distance"] == pytest.approx(0.2)
+
+    assert len(descriptors) == 1
+    row = descriptors.iloc[0]
+    assert row["role"] == "product"
+    assert row["value"] == pytest.approx(expected["prod_ni_o1"])
+    assert row["deltaG"] == pytest.approx(-5.0)
+    assert row["smiles"] == "product-opt-smiles"
+    assert "_product_" in row["unique_name"]
+
+
+def test_build_selected_descriptor_dataframe_uses_reactant_geometry():
+    """Reactant descriptors use reactant geometry and the same reaction ΔG."""
+    df = build_example_reaction_df().iloc[:2].copy()
+
+    descriptors = build_selected_descriptor_dataframe(df, "reac_cc_triple_len")
+    expected = compute_descriptors(
+        read_example_xyz("type_I_reactant.xyz"),
+        read_example_xyz("type_I_product.xyz"),
+    )
+
+    assert len(descriptors) == 1
+    row = descriptors.iloc[0]
+    assert row["role"] == "reactant"
+    assert row["value"] == pytest.approx(expected["reac_cc_triple_len"])
+    assert row["deltaG"] == pytest.approx(-5.0)
+    assert row["smiles"] == "reactant-opt-smiles"
+    assert "_reactant_" in row["unique_name"]
+
+
+def test_build_descriptor_dataframe_includes_tdelta_descriptors():
+    """Type_I and Type_II reaction rows produce pair-level tdelta descriptors."""
+    df = build_example_reaction_df()
+
+    descriptors = build_descriptor_dataframe(df)
+    type_i = compute_descriptors(
+        read_example_xyz("type_I_reactant.xyz"),
+        read_example_xyz("type_I_product.xyz"),
+    )
+    type_ii = compute_descriptors(
+        read_example_xyz("type_II_reactant.xyz"),
+        read_example_xyz("type_II_product.xyz"),
+    )
+    expected = compute_tdelta(type_i, type_ii)
+
+    tdelta_rows = descriptors[descriptors["descriptor_id"] == "tdelta_ni_Cb"]
+
+    assert not tdelta_rows.empty
+    assert tdelta_rows["role"].iloc[0] == "pair"
+    assert tdelta_rows["value"].iloc[0] == pytest.approx(expected["tdelta_ni_Cb"])
+    assert "Type_I - Type_II" in tdelta_rows["variant"].iloc[0]
+
+
+def test_build_selected_descriptor_dataframe_includes_tdelta_delta_g():
+    """Selected tdelta descriptor records use Type_I - Type_II ΔG."""
+    df = build_example_reaction_df()
+
+    descriptors = build_selected_descriptor_dataframe(df, "tdelta_ni_Cb")
+    type_i = compute_descriptors(
+        read_example_xyz("type_I_reactant.xyz"),
+        read_example_xyz("type_I_product.xyz"),
+    )
+    type_ii = compute_descriptors(
+        read_example_xyz("type_II_reactant.xyz"),
+        read_example_xyz("type_II_product.xyz"),
+    )
+    expected = compute_tdelta(type_i, type_ii)
+
+    assert len(descriptors) == 1
+    row = descriptors.iloc[0]
+    assert row["role"] == "pair"
+    assert row["value"] == pytest.approx(expected["tdelta_ni_Cb"])
+    assert row["deltaG"] == pytest.approx(-1.0)
+    assert "Type_I - Type_II" in row["variant"]
 
 
 def test_descriptor_keyword_filters_are_role_specific():
     """Descriptor keyword options and filters are separated by reactant/product role."""
-    shared_xyz = """5
-complex
-Ni 0.0 0.0 0.0
-N -2.0 0.0 0.0
-N 2.0 0.0 0.0
-C 0.0 2.0 0.0
-O 0.0 -2.0 0.0
-"""
-    df = pd.DataFrame(
-        {
-            "unique_name": [
-                "bipy-alpha_alkyne-one_reactant_conf1",
-                "bipy-beta_alkyne-two_product_conf1",
-            ],
-            "initial_smiles": ["alpha-reactant", "beta-product"],
-            "opt_xyz": [shared_xyz, shared_xyz],
-        }
-    )
+    df = build_example_reaction_df()
+    df.loc[df["reaction_role"] == "product", "unique_name"] = df.loc[
+        df["reaction_role"] == "product",
+        "unique_name",
+    ].str.replace("alpha", "beta", regex=False)
 
     assert "alpha" in extract_descriptor_keyword_options(df, "reactant")
     assert "beta" not in extract_descriptor_keyword_options(df, "reactant")
@@ -115,6 +177,84 @@ O 0.0 -2.0 0.0
         df,
         reactant_keywords=["alpha"],
         product_keywords=["beta"],
+        max_pairs=1,
+    )
+    pairs = build_descriptor_reaction_pairs(
+        df,
+        reactant_keywords=["alpha"],
+        product_keywords=["beta"],
+        max_pairs=1,
     )
 
-    assert set(descriptors["role"]) == {"reactant", "product"}
+    assert pairs
+    assert not descriptors.empty
+    assert descriptors["reaction_id"].nunique() == 1
+
+
+def test_descriptor_value_options_preserve_sorted_species_values():
+    """Descriptor value navigation exposes each species value as a selectable row."""
+    records = pd.DataFrame(
+        [
+            {
+                "descriptor_id": "prod_ni_o1",
+                "role": "product",
+                "reaction_id": "10",
+                "unique_name": "product_a",
+                "value": 1.23456,
+            },
+            {
+                "descriptor_id": "prod_ni_o1",
+                "role": "product",
+                "reaction_id": "11",
+                "unique_name": "product_b",
+                "value": 1.5,
+            },
+        ]
+    )
+
+    options = build_descriptor_value_options(records, "Å")
+
+    assert options["_descriptor_value_id"].tolist() == [
+        "prod_ni_o1:0",
+        "prod_ni_o1:1",
+    ]
+    assert options["_descriptor_value_position"].tolist() == [0, 1]
+    assert "Product | reaction 10 | product_a" in options[
+        "_descriptor_value_label"
+    ].iloc[0]
+
+
+def test_descriptor_delta_hover_html_uses_descriptor_x_and_delta_g_y():
+    """Hover plot payload contains descriptor values on x and ΔG values on y."""
+    records = pd.DataFrame(
+        [
+            {
+                "descriptor_id": "prod_ni_o1",
+                "descriptor": "Product: Ni O1",
+                "role": "product",
+                "variant": "Type_I",
+                "value": 1.2345,
+                "deltaG": -5.25,
+                "unique_name": "product_a",
+                "smiles": "C",
+                "xyz": read_example_xyz("type_I_product.xyz"),
+                "atom_summary": "descriptor_kit",
+                "reaction_id": "10",
+                "reactant_name": "reactant_a",
+                "product_name": "product_a",
+            }
+        ]
+    )
+
+    html = build_descriptor_delta_hover_html(
+        records,
+        "Product: Ni O1",
+        "Å",
+        "kcal/mol",
+        "ΔG",
+    )
+
+    assert '"value": 1.2345' in html
+    assert '"deltaG": -5.25' in html
+    assert "x: group.map((point) => point.value)" in html
+    assert "y: group.map((point) => point.deltaG)" in html

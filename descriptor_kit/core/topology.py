@@ -300,7 +300,6 @@ def bpy_ring_position(obj, ring_atom_idx):
     donors = obj.n_donors
 
     # Which donor's ring contains ring_atom_idx?
-    ring_for = {}
     rings = []
     for d in donors:
         r = _find_6ring(adj, d, els)

@@ -36,6 +36,9 @@ dependencies = [
     "ipython-genutils>=0.2.0",
     "plotly>=5.17.0",
     "numpy>=1.24.0",
+    "scipy>=1.9",
+    "rdkit>=2023.3",
+    "morfeus-ml>=0.8.0",
 ]
 
 [project.optional-dependencies]
@@ -57,8 +60,8 @@ Documentation = "https://github.com/Autonomous-Scientific-Agents/IQC_Dashboard#r
 Repository = "https://github.com/Autonomous-Scientific-Agents/IQC_Dashboard"
 Issues = "https://github.com/Autonomous-Scientific-Agents/IQC_Dashboard/issues"
 
-[tool.setuptools]
-packages = ["iqc_dashboard"]
+[tool.setuptools.packages.find]
+include = ["iqc_dashboard*", "descriptor_kit*"]
 
 [tool.setuptools.package-data]
 iqc_dashboard = ["*.toml"]
@@ -99,4 +102,3 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "@abstractmethod",
 ]
-
