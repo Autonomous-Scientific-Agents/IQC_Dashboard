@@ -7,7 +7,7 @@ name = "iqc-dashboard"
 version = "0.1.0"
 description = "A high-performance Computational Chemistry Dashboard using Streamlit, DuckDB, and 3D molecular visualization"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "Autonomous Scientific Agents"}
@@ -18,7 +18,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -67,7 +66,7 @@ iqc_dashboard = ["*.toml"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py310"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

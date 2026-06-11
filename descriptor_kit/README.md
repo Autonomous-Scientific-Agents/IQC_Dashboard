@@ -70,7 +70,7 @@ are recomputed per call, keeping each descriptor function self-contained.
 
 ## Dependencies
 
-Python ≥ 3.9, plus `numpy`, `scipy`, `rdkit` (CIP perception / SMILES), and
+Python ≥ 3.10, plus `numpy`, `scipy`, `rdkit` (CIP perception / SMILES), and
 `morfeus-ml` (Sterimol, BuriedVolume — note the import name is `morfeus`). See
 `requirements.txt`; tested with numpy 2.4.4 / scipy 1.17.1 / rdkit 2026.03.1 /
 morfeus-ml 0.8.0 on Python 3.13. 
@@ -78,4 +78,3 @@ morfeus-ml 0.8.0 on Python 3.13.
 Verified standalone: copied to an empty directory with only these packages
 installed (no repo present), `import descriptor_kit` and both entry points run
 and produce the full descriptor set.
-

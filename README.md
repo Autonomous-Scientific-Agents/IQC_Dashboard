@@ -64,7 +64,7 @@ Deep dive into one molecule at a time with:
 
 #### Step 1: Verify Python Version
 
-IQC Dashboard requires Python 3.9 or higher. Check your Python version:
+IQC Dashboard requires Python 3.10 or higher. Check your Python version:
 ```bash
 python --version
 # or
@@ -79,7 +79,7 @@ If you need to install or upgrade Python, visit [python.org](https://www.python.
 
 Choose one of the following methods:
 
-**Option A: Using `venv` (built into Python 3.9+)**
+**Option A: Using `venv` (built into Python 3.10+)**
 ```bash
 python -m venv iqc-dashboard-env
 source iqc-dashboard-env/bin/activate  # On macOS/Linux
@@ -89,7 +89,7 @@ iqc-dashboard-env\Scripts\activate  # On Windows
 
 **Option B: Using `conda` (recommended for scientific computing)**
 ```bash
-conda create -n iqc-dashboard-env python=3.9
+conda create -n iqc-dashboard-env python=3.10
 conda activate iqc-dashboard-env
 ```
 
@@ -290,7 +290,7 @@ See the full schema in the application documentation. The schema matches the out
    - **Repository**: Select `Autonomous-Scientific-Agents/IQC_Dashboard`
    - **Branch**: `main`
    - **Main file path**: `streamlit_app.py` (or `iqc_dashboard/app.py` if preferred)
-   - **Python version**: 3.9 or higher (Streamlit Cloud supports 3.9-3.12)
+   - **Python version**: 3.10 or higher
 
 4. **Advanced Settings** (optional):
    - Streamlit Cloud will automatically detect and use `pyproject.toml` for dependencies
