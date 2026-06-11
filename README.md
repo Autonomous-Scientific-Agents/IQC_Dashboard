@@ -293,8 +293,10 @@ See the full schema in the application documentation. The schema matches the out
    - **Python version**: 3.10 or higher
 
 4. **Advanced Settings** (optional):
-   - Streamlit Cloud will automatically detect and use `pyproject.toml` for dependencies
-   - Alternatively, you can specify `requirements.txt` in the advanced settings
+   - Streamlit Cloud uses `runtime.txt` to select Python 3.11
+   - Streamlit Cloud installs Python dependencies from `requirements.txt`
+   - Descriptor dependencies are installed by default through `requirements.txt`
+   - `packages.txt` installs Linux libraries needed by RDKit-style wheels
    - No secrets or environment variables are required for basic functionality
    - The app uses `streamlit_app.py` as the entry point (which imports from the package)
 
@@ -305,14 +307,21 @@ See the full schema in the application documentation. The schema matches the out
 
 ### Streamlit Cloud Configuration
 
-The repository includes a `.streamlit/config.toml` file with recommended settings. Streamlit Cloud will use these automatically.
+The repository includes:
+
+- `.streamlit/config.toml` for Streamlit settings
+- `runtime.txt` to pin the Streamlit Cloud Python runtime
+- `requirements.txt` for all Python dependencies, including `descriptor_kit`
+- `packages.txt` for Linux system libraries used by descriptor dependencies
+
+Streamlit Cloud will use these automatically.
 
 ### Troubleshooting Streamlit Cloud Deployment
 
 If you encounter issues:
 
-1. **Dependency conflicts**: Ensure all dependencies in `pyproject.toml` are compatible
-2. **Import errors**: Check that all required packages are listed in dependencies
+1. **Dependency conflicts**: Ensure all dependencies in `requirements.txt` are compatible
+2. **Import errors**: Check that all required packages are listed in `requirements.txt` and system packages in `packages.txt`
 3. **Memory issues**: The app uses DuckDB to handle large files efficiently, but very large datasets may require optimization
 4. **3D visualization not working**: Ensure `stmol` and `py3Dmol` are properly installed (they should be automatically installed from dependencies)
 

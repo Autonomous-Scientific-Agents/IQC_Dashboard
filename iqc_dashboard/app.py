@@ -5708,8 +5708,10 @@ def main(data_paths: Optional[List[str]] = None):
         elif not DESCRIPTOR_KIT_AVAILABLE:
             st.error("descriptor_kit could not be loaded.")
             st.info(
-                "Install the descriptor dependencies with "
-                "`uv pip install --python .venv/bin/python -r descriptor_kit/requirements.txt`."
+                "Install the default application dependencies with "
+                "`python -m pip install -r requirements.txt`. "
+                "Streamlit Community Cloud should install them automatically from "
+                "`requirements.txt`."
             )
             if DESCRIPTOR_KIT_IMPORT_ERROR:
                 st.code(DESCRIPTOR_KIT_IMPORT_ERROR)
